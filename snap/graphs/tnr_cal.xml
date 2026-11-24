@@ -1,0 +1,65 @@
+<!--
+  Reference chain for comparing against sarflood.calibrate:
+    Read -> ThermalNoiseRemoval -> Calibration (sigma0, linear) -> Write (BigTIFF)
+
+  No resampling, so the output keeps the input's radar-geometry pixel grid and can
+  be compared pixel for pixel. Run on the full slice; compare.py reads windows.
+
+  Parameters (pass with -P on the gpt command line):
+    input   path to the .SAFE zip
+    output  output file path, without extension (the writer adds .tif)
+    clip    true | false   (clipNegativeValues in ThermalNoiseRemoval)
+
+  Example:
+    ~/esa-snap/bin/gpt snap/graphs/tnr_cal.xml \
+      -Pinput=data/raw/sindh/S1A_..._E8B2.zip \
+      -Poutput=data/snap/sindh/S1A_..._E8B2_tnr_cal \
+      -Pclip=true
+-->
+<graph id="tnr_cal">
+  <version>1.0</version>
+
+  <node id="Read">
+    <operator>Read</operator>
+    <parameters>
+      <file>${input}</file>
+    </parameters>
+  </node>
+
+  <node id="ThermalNoiseRemoval">
+    <operator>ThermalNoiseRemoval</operator>
+    <sources>
+      <sourceProduct refid="Read"/>
+    </sources>
+    <parameters>
+      <selectedPolarisations>VV,VH</selectedPolarisations>
+      <removeThermalNoise>true</removeThermalNoise>
+      <clipNegativeValues>${clip}</clipNegativeValues>
+      <outputNoise>false</outputNoise>
+    </parameters>
+  </node>
+
+  <node id="Calibration">
+    <operator>Calibration</operator>
+    <sources>
+      <sourceProduct refid="ThermalNoiseRemoval"/>
+    </sources>
+    <parameters>
+      <outputSigmaBand>true</outputSigmaBand>
+      <outputBetaBand>false</outputBetaBand>
+      <outputGammaBand>false</outputGammaBand>
+      <outputImageScaleInDb>false</outputImageScaleInDb>
+    </parameters>
+  </node>
+
+  <node id="Write">
+    <operator>Write</operator>
+    <sources>
+      <sourceProduct refid="Calibration"/>
+    </sources>
+    <parameters>
+      <file>${output}</file>
+      <formatName>GeoTIFF-BigTIFF</formatName>
+    </parameters>
+  </node>
+</graph>

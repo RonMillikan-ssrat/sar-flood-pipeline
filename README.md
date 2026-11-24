@@ -15,7 +15,9 @@ terrain, a drift check flags it, and the model registry refuses to promote it.
 | Catalog query: Sentinel-1 GRD scenes per AOI per day | Airflow DAG `s1_catalog` + CDSE OData | **done** |
 | Group slices into passes; pair each flood pass with a same-track dry reference | `passes.py`, `sarflood pairs` | **done** |
 | Download raw `.SAFE` for one flood/reference pair | `download.py`, `sarflood download` | **done** |
-| Preprocess raw pair (noise, calibration, terrain correction) | SNAP `gpt` or Python | todo |
+| Thermal-noise removal + σ⁰ calibration, radar geometry | `calibrate.py`, `sarflood calibrate` | **done** |
+| Same slice through SNAP `gpt`; compare σ⁰ pixel for pixel | `snap/graphs/tnr_cal.xml`, `compare.py`, `sarflood compare` | **built**, awaiting first run |
+| Terrain correction | SNAP `Terrain-Correction` | todo |
 | Server-side processed backscatter for scale | Sentinel Hub / openEO | todo |
 | Labels: Copernicus EMS delineations, Sen1Floods11 | | todo |
 | Baseline: Otsu threshold on VV backscatter | | todo |
@@ -41,6 +43,9 @@ src/sarflood/
   passes.py    slices -> passes (datatake), dedupe, same-track reference pairing
   auth.py      CDSE access tokens (password grant + refresh)
   download.py  .SAFE zip download: manual redirects, size check, skip-if-complete
+  calibrate.py DN -> sigma0 from the calibration/noise LUT XMLs (radar geometry)
+  compare.py   our sigma0 vs SNAP's, pixel for pixel, in dB
+snap/graphs/  SNAP gpt graphs used as references
   cli.py       run the same logic without Airflow
 tests/      pytest, no network needed
 ```
@@ -105,6 +110,16 @@ airflow backfill create --dag-id s1_catalog --from-date 2022-08-15 --to-date 202
   so reruns overwrite. Writes are atomic (temp file + rename).
 - **Thin DAGs.** All logic lives in `src/` and is testable without Airflow;
   the CLI runs the same code paths.
+- **Negative power after noise removal.** Over calm water the thermal noise can
+  exceed DN², especially in VH (13% of pixels in a Sindh 2022 test window,
+  vs 0.35% for VV). With clipping on, intensity ≤ 0 is set to 1e-5 (DN² units)
+  before calibration. That matches SNAP 14 `ThermalNoiseRemoval`
+  (`clipNegativeValues=true`), verified as SNAP σ⁰ × A² = 1e-5 at every such
+  pixel, and keeps dB values finite (about −105 dB). Clipping before averaging or
+  resampling biases dark targets upward (MPC-0392), so the training pipeline
+  uses `--no-clip` until after terrain correction.
+- **Validated against SNAP 14.** VV σ⁰ on a 2048 × 2048 window: max
+  |difference| 0.0029 dB, 100% of pixels within 0.01 dB, no mirroring.
 - **Pairing rule.** A reference must match the flood pass's relative orbit, orbit
   direction and polarisation, fall in the event's dry-season `reference` window,
   and cover at least 50% of the AOI. The latest qualifying pass wins (least

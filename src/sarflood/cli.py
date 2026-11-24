@@ -6,6 +6,9 @@ Examples:
     sarflood query --aoi houston --event harvey-2017 --dry-run
     sarflood pairs --aoi sindh --event pakistan-2022
     sarflood download --aoi sindh --event pakistan-2022 --flood-pass S1A_044775_0558C6 --dry-run
+    sarflood calibrate data/raw/sindh/S1A_..._E8B2.zip --pol vv --window 8000 10048 12000 14048
+    sarflood compare data/sigma0/sindh/..._vv_nr_win8000-10048_12000-14048.tif \
+        data/snap/sindh/..._tnr_cal.tif --snap-band Sigma0_VV
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ import logging
 import sys
 from collections import Counter
 from datetime import UTC, datetime, time
+from pathlib import Path
 
 from .aoi import load_aois
 from .catalog import DEFAULT_PRODUCT_TYPE, build_filter, search_scenes
@@ -162,6 +166,75 @@ def cmd_download(args) -> int:
     return 0
 
 
+def cmd_calibrate(args) -> int:
+    from pathlib import Path
+
+    from .calibrate import calibrate_safe
+
+    z = Path(args.zip)
+    if not z.exists():
+        print(f"{z} not found", file=sys.stderr)
+        return 2
+    suffix = "" if args.window is None else "_win{}-{}_{}-{}".format(*args.window)
+    noise = "" if args.no_noise else ("_nr" if not args.no_clip else "_nr_noclip")
+    out = Path(args.out) if args.out else (
+        data_root() / "sigma0" / z.parent.name / f"{z.stem}_{args.pol.lower()}{noise}{suffix}.tif")
+    st = calibrate_safe(z, args.pol, out, window=tuple(args.window) if args.window else None,
+                        remove_noise=not args.no_noise, clip_negative=not args.no_clip)
+    print(f"{out}")
+    print(f"valid px {st.valid:,}  negative after noise removal {st.negative:,} "
+          f"({100 * st.negative / max(st.valid, 1):.2f}%)")
+    return 0
+
+
+def cmd_compare(args) -> int:
+    import rasterio
+
+    from .compare import compare_arrays, describe, read_window
+
+    for f in (args.ours, args.snap):
+        if not Path(f).exists():
+            print(f"{f} not found", file=sys.stderr)
+            return 2
+    print("SNAP file:", *describe(args.snap), sep="\n  ")
+    with rasterio.open(args.ours) as src:
+        tags = src.tags()
+        ours = src.read(1)
+    win = tags.get("window")
+    if not win:
+        print(f"{args.ours} has no 'window' tag; was it written by sarflood calibrate?",
+              file=sys.stderr)
+        return 2
+    rows, cols = win.split(",")
+    r0, r1 = map(int, rows.split(":"))
+    c0, c1 = map(int, cols.split(":"))
+    band = int(args.snap_band) if args.snap_band.isdigit() else args.snap_band
+    snap = read_window(args.snap, band, (r0, r1, c0, c1))
+
+    res = compare_arrays(ours, snap)
+    print(f"window rows {r0}:{r1} cols {c0}:{c1}  ({res.n_pixels:,} px)  "
+          f"ours: {tags.get('polarisation')} clip={tags.get('negatives_clipped')}")
+    print(f"  no-data   ours {res.nodata_ours:,}  snap {res.nodata_snap:,}  "
+          f"mismatch {res.nodata_mismatch:,}")
+    print(f"  zeros     ours {res.zero_ours:,}  snap {res.zero_snap:,}  "
+          f"mismatch {res.zero_mismatch:,}")
+    print(f"  negative  ours {res.negative_ours:,}  snap {res.negative_snap:,}")
+    print(f"  compared  {res.n_compared:,} px positive in both")
+    print(f"  diff dB   mean {res.mean_db:+.4f}  median {res.median_db:+.4f}  "
+          f"std {res.std_db:.4f}  p1 {res.p01_db:+.4f}  p99 {res.p99_db:+.4f}  "
+          f"max|d| {res.max_abs_db:.4f}")
+    print(f"  within    0.01 dB {100 * res.within_001_db:.2f}%   "
+          f"0.1 dB {100 * res.within_01_db:.2f}%")
+    print(f"  corr(log) aligned {res.corr_log:.5f}  flipped L-R {res.corr_log_flipped_lr:.5f}  "
+          f"flipped U-D {res.corr_log_flipped_ud:.5f}")
+    tag = "".join(ch if ch.isalnum() else "_" for ch in args.snap_band)
+    out = write_json(Path(args.ours).with_suffix(f".compare_b{tag}.json"),
+                     {"ours": args.ours, "snap": args.snap, "snap_band": args.snap_band,
+                      "window": [r0, r1, c0, c1], **res.to_dict()})
+    print(f"-> {out}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="sarflood")
     p.add_argument("--config", default=None, help="path to aois.yaml")
@@ -196,6 +269,24 @@ def main(argv: list[str] | None = None) -> int:
     dl.add_argument("--flood-pass", required=True, help="pass key, e.g. S1A_044775_0558C6")
     dl.add_argument("--dry-run", action="store_true", help="list products and sizes only")
     dl.set_defaults(func=cmd_download)
+
+    ca = sub.add_parser("calibrate", help="thermal-noise removal + sigma0 calibration (radar geometry)")
+    ca.add_argument("zip", help="downloaded .SAFE zip")
+    ca.add_argument("--pol", default="vv", choices=["vv", "vh", "VV", "VH"])
+    ca.add_argument("--window", type=int, nargs=4, metavar=("ROW0", "ROW1", "COL0", "COL1"),
+                    help="half-open pixel window for quick tests")
+    ca.add_argument("--no-noise", action="store_true", help="skip thermal-noise removal")
+    ca.add_argument("--no-clip", action="store_true",
+                    help="keep negative values after noise removal (use before resampling)")
+    ca.add_argument("--out", help="output GeoTIFF (default under $DATA_ROOT/sigma0/)")
+    ca.set_defaults(func=cmd_calibrate)
+
+    co = sub.add_parser("compare", help="compare our sigma0 window with SNAP's output")
+    co.add_argument("ours", help="GeoTIFF from 'sarflood calibrate'")
+    co.add_argument("snap", help="SNAP GeoTIFF (full slice)")
+    co.add_argument("--snap-band", default="1",
+                    help="band name (e.g. Sigma0_VV) or 1-based index (default 1)")
+    co.set_defaults(func=cmd_compare)
 
     args = p.parse_args(argv)
     if args.config is None:
