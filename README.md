@@ -14,7 +14,9 @@ terrain, a drift check flags it, and the model registry refuses to promote it.
 |---|---|---|
 | Catalog query: Sentinel-1 GRD scenes per AOI per day | Airflow DAG `s1_catalog` + CDSE OData | **done** |
 | Group slices into passes; pair each flood pass with a same-track dry reference | `passes.py`, `sarflood pairs` | **done** |
-| Download + preprocess (calibration, speckle filter, tiling) | Airflow / Cloud Batch | todo |
+| Download raw `.SAFE` for one flood/reference pair | `download.py`, `sarflood download` | **done** |
+| Preprocess raw pair (noise, calibration, terrain correction) | SNAP `gpt` or Python | todo |
+| Server-side processed backscatter for scale | Sentinel Hub / openEO | todo |
 | Labels: Copernicus EMS delineations, Sen1Floods11 | | todo |
 | Baseline: Otsu threshold on VV backscatter | | todo |
 | Train U-Net | GEAP Pipelines (Kubeflow) | todo |
@@ -37,6 +39,8 @@ src/sarflood/
   catalog.py   CDSE OData search with pagination
   manifest.py  idempotent JSON manifests under $DATA_ROOT
   passes.py    slices -> passes (datatake), dedupe, same-track reference pairing
+  auth.py      CDSE access tokens (password grant + refresh)
+  download.py  .SAFE zip download: manual redirects, size check, skip-if-complete
   cli.py       run the same logic without Airflow
 tests/      pytest, no network needed
 ```
@@ -53,6 +57,19 @@ sarflood list-aois
 sarflood query --aoi sindh --start 2022-08-28 --end 2022-09-01 --dry-run   # prints $filter
 sarflood -v query --aoi sindh --start 2022-08-28 --end 2022-09-01          # live query
 sarflood pairs --aoi sindh --event pakistan-2022                            # flood/reference pairs
+sarflood download --aoi sindh --event pakistan-2022 \
+    --flood-pass S1A_044775_0558C6 --dry-run                                # list files + sizes
+```
+
+Downloading needs a free Copernicus Data Space account. Put the credentials in
+`~/.netrc` (`chmod 600`), never in the repo:
+
+```
+machine identity.dataspace.copernicus.eu login you@example.com password ...
+```
+
+```bash
+sarflood -v download --aoi sindh --event pakistan-2022 --flood-pass S1A_044775_0558C6
 ```
 
 Airflow 3.4, installed with its constraints file so dependency versions match
@@ -93,7 +110,11 @@ airflow backfill create --dag-id s1_catalog --from-date 2022-08-15 --to-date 202
   and cover at least 50% of the AOI. The latest qualifying pass wins (least
   unrelated change). S1A/S1B/S1C/S1D on the same track are interchangeable
   unless `--same-platform` is given.
-- **Catalog search needs no token.** Downloads will (CDSE account, later step).
+- **Catalog search needs no token; downloads do.** The download URL redirects, and
+  `requests` drops the `Authorization` header on a cross-host redirect, so the
+  downloader follows redirects itself and re-sends the token only to
+  `*.copernicus.eu`. Files land as `.zip.part` and are renamed only after the
+  byte count matches the catalog's `ContentLength`.
 - **Coverage gap.** Only one satellite was operating from 2022 to 2024, after
   Sentinel-1B failed, so revisit was lower. S1C (Dec 2024) and S1D (data from
   Apr 2026) restore the two-satellite cycle.

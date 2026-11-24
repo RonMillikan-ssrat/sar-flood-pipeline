@@ -5,11 +5,13 @@ Examples:
     sarflood query --aoi sindh --start 2022-08-28 --end 2022-09-01
     sarflood query --aoi houston --event harvey-2017 --dry-run
     sarflood pairs --aoi sindh --event pakistan-2022
+    sarflood download --aoi sindh --event pakistan-2022 --flood-pass S1A_044775_0558C6 --dry-run
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from collections import Counter
@@ -119,6 +121,47 @@ def cmd_pairs(args) -> int:
     return 0
 
 
+def cmd_download(args) -> int:
+    from .auth import CDSEAuth
+    from .download import download_product, product_size
+
+    pairs_file = data_root() / "pairs" / args.aoi / f"{args.event}.json"
+    if not pairs_file.exists():
+        print(f"{pairs_file} not found; run 'sarflood pairs' first", file=sys.stderr)
+        return 2
+    doc = json.loads(pairs_file.read_text())
+    match = [p for p in doc["pairs"] if p["flood"]["key"] == args.flood_pass]
+    if not match:
+        keys = [p["flood"]["key"] for p in doc["pairs"]]
+        print(f"no flood pass {args.flood_pass!r} in {pairs_file}; have {keys}", file=sys.stderr)
+        return 2
+    pair = match[0]
+    if pair["reference"] is None:
+        print(f"{args.flood_pass} has no reference ({pair['reason']})", file=sys.stderr)
+        return 2
+
+    jobs = []  # (role, pass key, product id, name)
+    for role in ("flood", "reference"):
+        ps = pair[role]
+        jobs += [(role, ps["key"], pid, name) for pid, name in zip(ps["ids"], ps["slices"])]
+
+    sizes = {pid: product_size(pid) for _, _, pid, _ in jobs}
+    total = sum(v or 0 for v in sizes.values())
+    for role, key, pid, name in jobs:
+        sz = sizes[pid]
+        print(f"  {role:<9} {key}  {name}  {sz / 1e9 if sz else float('nan'):.2f} GB")
+    print(f"{len(jobs)} products, {total / 1e9:.2f} GB total")
+    if args.dry_run:
+        return 0
+
+    dest = data_root() / "raw" / args.aoi
+    auth = CDSEAuth()
+    for role, key, pid, name in jobs:
+        path = download_product(pid, name, dest, auth, expected_size=sizes[pid])
+        print(f"  ok {path}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="sarflood")
     p.add_argument("--config", default=None, help="path to aois.yaml")
@@ -146,6 +189,13 @@ def main(argv: list[str] | None = None) -> int:
     pr.add_argument("--same-platform", action="store_true",
                     help="require the reference to come from the same satellite")
     pr.set_defaults(func=cmd_pairs)
+
+    dl = sub.add_parser("download", help="download one flood pass and its reference (.SAFE zips)")
+    dl.add_argument("--aoi", required=True)
+    dl.add_argument("--event", required=True)
+    dl.add_argument("--flood-pass", required=True, help="pass key, e.g. S1A_044775_0558C6")
+    dl.add_argument("--dry-run", action="store_true", help="list products and sizes only")
+    dl.set_defaults(func=cmd_download)
 
     args = p.parse_args(argv)
     if args.config is None:
