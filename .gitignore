@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Data: never commit imagery or manifests
+data/*
+!data/.gitkeep
+*.SAFE/
+*.zip
+*.tif
+*.tiff
+*.zarr/
+*.nc
+
+# Airflow (AIRFLOW_HOME lives in the repo for local dev)
+airflow_home/
+
+# MLflow
+mlruns/
+mlartifacts/
+
+# Secrets
+.env
+*.json.key
+credentials*.json
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+*:Zone.Identifier

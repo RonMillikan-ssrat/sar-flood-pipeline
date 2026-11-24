@@ -1,0 +1,63 @@
+# Areas of interest for the domain-shift experiment.
+#
+# role:
+#   train   - source domain: open floodplains, plentiful Copernicus EMS labels
+#   holdout - target domain: never seen in training; used to measure shift
+#
+# bbox is [min_lon, min_lat, max_lon, max_lat] in EPSG:4326.
+# These boxes are APPROXIMATE starting points. Check and adjust them in
+# Copernicus Browser before relying on them.
+#
+# events: date windows used for backfills. Dates marked "verify" have not
+# been checked against an EMS activation or gauge record yet.
+
+aois:
+  sindh:
+    role: train
+    description: Lower Indus floodplain near Dadu / Lake Manchar, Pakistan
+    bbox: [67.5, 26.0, 68.5, 27.5]
+    events:
+      - name: pakistan-2022
+        start: "2022-08-15"
+        end: "2022-09-30"
+        notes: "Copernicus EMS activations EMSR629 / EMSR631"
+
+  jamuna:
+    role: train
+    description: Jamuna (Brahmaputra) floodplain near Sirajganj, Bangladesh
+    bbox: [89.4, 24.0, 90.0, 25.3]
+    events:
+      - name: monsoon-2024
+        start: "2024-07-01"
+        end: "2024-09-30"
+        notes: "verify - generic monsoon window, not a specific event"
+
+  sylhet:
+    role: train
+    description: Sylhet haor basin, northeastern Bangladesh
+    bbox: [91.4, 24.6, 92.2, 25.2]
+    events:
+      - name: sylhet-2022
+        start: "2022-06-10"
+        end: "2022-07-10"
+        notes: "verify"
+      - name: sylhet-2025
+        start: "2025-05-25"
+        end: "2025-06-20"
+        notes: "Extreme rainfall late May / early June 2025"
+
+  houston:
+    role: holdout
+    description: Houston metro and Addicks/Barker reservoirs (urban, hard case for SAR)
+    bbox: [-95.8, 29.5, -95.0, 30.1]
+    events:
+      - name: harvey-2017
+        start: "2017-08-24"
+        end: "2017-09-10"
+        notes: "Hurricane Harvey"
+
+  red-river:
+    role: holdout
+    description: Red River of the North, Fargo to Grand Forks (rural, USGS-gauged)
+    bbox: [-97.1, 46.7, -96.6, 48.0]
+    events: []  # TODO: pick a spring flood year from the USGS gauge record
