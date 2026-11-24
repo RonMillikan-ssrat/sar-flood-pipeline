@@ -18,6 +18,8 @@ class Event:
     start: date
     end: date
     notes: str = ""
+    reference_start: date | None = None  # dry-period window for reference passes
+    reference_end: date | None = None
 
 
 @dataclass(frozen=True)
@@ -33,6 +35,11 @@ class AOI:
         x0, y0, x1, y1 = self.bbox
         ring = [(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)]
         return "POLYGON((" + ",".join(f"{x} {y}" for x, y in ring) + "))"
+
+    def geometry(self):
+        from shapely.geometry import box
+
+        return box(*self.bbox)
 
 
 def _parse_bbox(name: str, raw) -> tuple[float, float, float, float]:
@@ -51,7 +58,13 @@ def _parse_event(aoi_name: str, raw: dict) -> Event:
     end = date.fromisoformat(str(raw["end"]))
     if end <= start:
         raise ValueError(f"{aoi_name}/{raw['name']}: end must be after start")
-    return Event(name=raw["name"], start=start, end=end, notes=raw.get("notes", ""))
+    ref = raw.get("reference") or {}
+    ref_start = date.fromisoformat(str(ref["start"])) if ref else None
+    ref_end = date.fromisoformat(str(ref["end"])) if ref else None
+    if ref and not (ref_start < ref_end <= start):
+        raise ValueError(f"{aoi_name}/{raw['name']}: reference window must end by event start")
+    return Event(name=raw["name"], start=start, end=end, notes=raw.get("notes", ""),
+                 reference_start=ref_start, reference_end=ref_end)
 
 
 def load_aois(path: Path | str = DEFAULT_CONFIG) -> dict[str, AOI]:

@@ -4,6 +4,7 @@ Examples:
     sarflood list-aois
     sarflood query --aoi sindh --start 2022-08-28 --end 2022-09-01
     sarflood query --aoi houston --event harvey-2017 --dry-run
+    sarflood pairs --aoi sindh --event pakistan-2022
 """
 
 from __future__ import annotations
@@ -16,7 +17,8 @@ from datetime import UTC, datetime, time
 
 from .aoi import load_aois
 from .catalog import DEFAULT_PRODUCT_TYPE, build_filter, search_scenes
-from .manifest import write_manifest
+from .manifest import data_root, write_json, write_manifest
+from .passes import group_passes, select_reference
 
 
 def _day(s: str) -> datetime:
@@ -64,6 +66,59 @@ def cmd_query(args) -> int:
     return 0
 
 
+def cmd_pairs(args) -> int:
+    aois = load_aois(args.config)
+    aoi = aois.get(args.aoi)
+    if aoi is None:
+        print(f"unknown AOI {args.aoi!r}; choose from {sorted(aois)}", file=sys.stderr)
+        return 2
+    ev = {e.name: e for e in aoi.events}.get(args.event)
+    if ev is None:
+        print(f"unknown event {args.event!r} for {aoi.name}", file=sys.stderr)
+        return 2
+    if ev.reference_start is None:
+        print(f"{aoi.name}/{ev.name} has no reference window in the config", file=sys.stderr)
+        return 2
+
+    wkt, geom = aoi.to_wkt(), aoi.geometry()
+    ev_start, ev_end = _day(ev.start.isoformat()), _day(ev.end.isoformat())
+    ref_start, ref_end = _day(ev.reference_start.isoformat()), _day(ev.reference_end.isoformat())
+
+    flood_passes = group_passes(search_scenes(wkt, ev_start, ev_end, args.product_type))
+    ref_passes = group_passes(search_scenes(wkt, ref_start, ref_end, args.product_type))
+    print(f"{aoi.name}/{ev.name}: {len(flood_passes)} flood passes "
+          f"({ev.start}..{ev.end}), {len(ref_passes)} reference candidates "
+          f"({ev.reference_start}..{ev.reference_end})")
+    print("reference tracks:",
+          dict(Counter(f"{p.relative_orbit}{(p.orbit_direction or '?')[0]}" for p in ref_passes)))
+
+    pairings = []
+    for fp in flood_passes:
+        pr = select_reference(fp, ref_passes, geom, ref_start, ref_end,
+                              min_coverage=args.min_coverage, same_platform=args.same_platform)
+        pairings.append(pr)
+        ref = pr.reference.key if pr.reference else "-"
+        print(f"  {fp.start:%Y-%m-%d %H:%M} {fp.key}  track {fp.relative_orbit:>3}"
+              f"{(fp.orbit_direction or '?')[0]}  slices={len(fp.slices)}"
+              f"{'' if fp.contiguous else '(GAP)'}  cov={fp.coverage(geom):.3f}"
+              f"  ref={ref}  [{pr.reason}]")
+
+    paired = sum(p.reference is not None for p in pairings)
+    out = write_json(data_root() / "pairs" / aoi.name / f"{ev.name}.json", {
+        "aoi": aoi.name, "event": ev.name,
+        "event_window": [ev.start.isoformat(), ev.end.isoformat()],
+        "reference_window": [ev.reference_start.isoformat(), ev.reference_end.isoformat()],
+        "min_coverage": args.min_coverage, "same_platform": args.same_platform,
+        "pairs": [{
+            "flood": pr.flood.summary(geom),
+            "reference": pr.reference.summary(geom) if pr.reference else None,
+            "reason": pr.reason,
+        } for pr in pairings],
+    })
+    print(f"{paired}/{len(pairings)} flood passes paired -> {out}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="sarflood")
     p.add_argument("--config", default=None, help="path to aois.yaml")
@@ -81,6 +136,16 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--dry-run", action="store_true", help="print the $filter and exit")
     q.add_argument("--show", type=int, default=10, help="scenes to print")
     q.set_defaults(func=cmd_query)
+
+    pr = sub.add_parser("pairs", help="pair flood passes with same-track dry references")
+    pr.add_argument("--aoi", required=True)
+    pr.add_argument("--event", required=True)
+    pr.add_argument("--product-type", default=DEFAULT_PRODUCT_TYPE)
+    pr.add_argument("--min-coverage", type=float, default=0.5,
+                    help="fraction of the AOI a pass must cover (default 0.5)")
+    pr.add_argument("--same-platform", action="store_true",
+                    help="require the reference to come from the same satellite")
+    pr.set_defaults(func=cmd_pairs)
 
     args = p.parse_args(argv)
     if args.config is None:

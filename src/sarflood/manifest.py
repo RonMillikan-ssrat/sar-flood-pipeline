@@ -42,3 +42,17 @@ def write_manifest(aoi: str, start: datetime, end: datetime, scenes: list[Scene]
     tmp.write_text(json.dumps(doc, indent=2))
     tmp.replace(path)  # atomic rename, so readers never see a half-written file
     return path
+
+
+def load_manifest(path: Path | str) -> list[Scene]:
+    doc = json.loads(Path(path).read_text())
+    return [Scene(**s) for s in doc["scenes"]]
+
+
+def write_json(path: Path, doc: dict) -> Path:
+    """Atomic JSON write for other outputs (e.g. pairs)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(doc, indent=2))
+    tmp.replace(path)
+    return path

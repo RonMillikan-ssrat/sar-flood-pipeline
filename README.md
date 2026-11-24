@@ -13,6 +13,7 @@ terrain, a drift check flags it, and the model registry refuses to promote it.
 | Stage | Tool | Status |
 |---|---|---|
 | Catalog query: Sentinel-1 GRD scenes per AOI per day | Airflow DAG `s1_catalog` + CDSE OData | **done** |
+| Group slices into passes; pair each flood pass with a same-track dry reference | `passes.py`, `sarflood pairs` | **done** |
 | Download + preprocess (calibration, speckle filter, tiling) | Airflow / Cloud Batch | todo |
 | Labels: Copernicus EMS delineations, Sen1Floods11 | | todo |
 | Baseline: Otsu threshold on VV backscatter | | todo |
@@ -35,6 +36,7 @@ src/sarflood/
   aoi.py       config loading, bbox -> WKT
   catalog.py   CDSE OData search with pagination
   manifest.py  idempotent JSON manifests under $DATA_ROOT
+  passes.py    slices -> passes (datatake), dedupe, same-track reference pairing
   cli.py       run the same logic without Airflow
 tests/      pytest, no network needed
 ```
@@ -50,6 +52,7 @@ pytest -q
 sarflood list-aois
 sarflood query --aoi sindh --start 2022-08-28 --end 2022-09-01 --dry-run   # prints $filter
 sarflood -v query --aoi sindh --start 2022-08-28 --end 2022-09-01          # live query
+sarflood pairs --aoi sindh --event pakistan-2022                            # flood/reference pairs
 ```
 
 Airflow 3.4, installed with its constraints file so dependency versions match
@@ -85,6 +88,11 @@ airflow backfill create --dag-id s1_catalog --from-date 2022-08-15 --to-date 202
   so reruns overwrite. Writes are atomic (temp file + rename).
 - **Thin DAGs.** All logic lives in `src/` and is testable without Airflow;
   the CLI runs the same code paths.
+- **Pairing rule.** A reference must match the flood pass's relative orbit, orbit
+  direction and polarisation, fall in the event's dry-season `reference` window,
+  and cover at least 50% of the AOI. The latest qualifying pass wins (least
+  unrelated change). S1A/S1B/S1C/S1D on the same track are interchangeable
+  unless `--same-platform` is given.
 - **Catalog search needs no token.** Downloads will (CDSE account, later step).
 - **Coverage gap.** Only one satellite was operating from 2022 to 2024, after
   Sentinel-1B failed, so revisit was lower. S1C (Dec 2024) and S1D (data from

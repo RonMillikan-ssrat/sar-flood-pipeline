@@ -36,6 +36,7 @@ class Scene:
     size_bytes: int | None
     s3_path: str | None
     footprint: str | None
+    published: str | None = None  # PublicationDate: newer = reprocessed copy
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -100,6 +101,7 @@ def parse_scene(p: dict) -> Scene:
         size_bytes=p.get("ContentLength"),
         s3_path=p.get("S3Path"),
         footprint=footprint if isinstance(footprint, str) else None,
+        published=p.get("PublicationDate"),
     )
 
 
