@@ -21,7 +21,8 @@ terrain, a drift check flags it, and the model registry refuses to promote it.
 | Terrain correction: per-slice TNR (no clip) → slice assembly → precise orbit → σ⁰ → Copernicus 30 m DEM, UTM, fixed grid → AOI clip | `snap.py`, `sarflood terrain-correct` | **done** (Sindh 78D flood pass) |
 | Server-side processed backscatter for scale | Sentinel Hub / openEO | todo |
 | Change detection on the shared grid: VV/VH dB, change, masks, quick-look, threshold preview | `change.py`, `sarflood change` | **built** |
-| Labels: Copernicus EMS delineations, Sen1Floods11 | | todo |
+| EMS activation check: AOI extents vs ours, product imagery (circularity check) | `ems.py`, `sarflood ems-info` | **built** |
+| Labels: EMS delineation (flood fraction via sub-pixel rasterization, AOI, not-analysed, permanent water) on the change grid; IoU/F1/precision/recall; outcome map | `labels.py`, `sarflood evaluate` | **built** |
 | Baseline: Otsu threshold on VV backscatter | | todo |
 | Train U-Net | GEAP Pipelines (Kubeflow) | todo |
 | Track, register, gate, roll back | MLflow | todo |
@@ -50,6 +51,8 @@ src/sarflood/
   snap.py      generates SNAP gpt graphs (any slice count) and runs gpt
   orbits.py    finds/downloads AUX_POEORB orbit files for a pass from CDSE
   change.py    flood vs reference on the shared grid: dB, change, masks, quick-look
+  ems.py       Copernicus EMS Rapid Mapping API: AOIs, products, imagery
+  labels.py    EMS vector package -> label rasters on the change grid; scoring
 snap/graphs/  SNAP gpt graphs used as references
   cli.py       run the same logic without Airflow
 tests/      pytest, no network needed
@@ -129,6 +132,11 @@ airflow backfill create --dag-id s1_catalog --from-date 2022-08-15 --to-date 202
   pixel spacing and `alignToStandardGrid` with origin (0, 0), so every pass over
   an AOI lands on the same grid. Flood and reference images can then be
   differenced pixel for pixel without resampling again.
+- **Labels are independent of the input.** EMSR629 AOI01 (Larkana) was delineated
+  from SPOT-6/7 optical imagery on 2022-08-30 05:44 UTC, 4 h 19 min after the
+  Sentinel-1 pass we classify. Scored region: inside the EMS AOI, assessed, valid
+  in the change map, excluding permanent water (Lake/River; "Land Subject to
+  Inundation" is floodable land and stays in).
 - **Pairing rule.** A reference must match the flood pass's relative orbit, orbit
   direction and polarisation, fall in the event's dry-season `reference` window,
   and cover at least 50% of the AOI. The latest qualifying pass wins (least

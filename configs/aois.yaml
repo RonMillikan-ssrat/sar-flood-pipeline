@@ -69,3 +69,14 @@ aois:
     description: Red River of the North, Fargo to Grand Forks (rural, USGS-gauged)
     bbox: [-97.1, 46.7, -96.6, 48.0]
     events: []  # TODO: pick a spring flood year from the USGS gauge record
+
+  larkana:
+    role: train
+    description: EMSR629 AOI01 Larkana (labels = EMS delineation from SPOT-6/7, 2022-08-30 05:44 UTC)
+    bbox: [68.05, 27.44, 68.46, 27.72]
+    events:
+      - name: pakistan-2022
+        start: "2022-08-15"
+        end: "2022-09-30"
+        notes: "EMSR629 AOI01 DEL v2; SPOT-6/7 30 Aug 2022 05:44 UTC, 4 h after S1A track 78D"
+        reference: {start: "2022-03-01", end: "2022-06-01"}  # pre-monsoon; verify

@@ -383,6 +383,110 @@ def cmd_change(args) -> int:
     return 0
 
 
+def cmd_ems_info(args) -> int:
+    from .ems import fetch_activation, is_sentinel1, overlap_fractions, parse_activation
+
+    aois = load_aois(args.config)
+    rc = 0
+    for code in args.code:
+        doc = fetch_activation(code)
+        raw = write_json(data_root() / "ems" / f"{code}.json", doc)
+        meta, ems_aois = parse_activation(doc)
+        print(f"== {meta['code']}  {meta['name']}  event {meta['eventTime']}  "
+              f"activated {meta['activationTime']}   (raw -> {raw})")
+        for a in ems_aois:
+            bb = ", ".join(f"{v:.3f}" for v in a.extent.bounds) if a.extent else "no extent"
+            print(f"  AOI{a.number:02d} {a.name:<14} bbox [{bb}]")
+            for name, ours in aois.items():
+                in_ours, covers = overlap_fractions(a.extent, ours.geometry())
+                if in_ours > 0:
+                    print(f"      overlaps {name:<10}: {100 * in_ours:5.1f}% of the EMS AOI lies in "
+                          f"ours; covers {100 * covers:5.1f}% of ours")
+            for pr in a.products:
+                print(f"      {pr.type} v{pr.version}  delivered {pr.delivery_time}")
+                for im in pr.images:
+                    flag = "   <-- Sentinel-1" if is_sentinel1(im) else ""
+                    print(f"          image {im.sensor_type}/{im.sensor_name}  "
+                          f"{im.acquisition_time}  {im.file_name or ''}{flag}")
+                if pr.download:
+                    print(f"          zip {pr.download}")
+    return rc
+
+
+def cmd_evaluate(args) -> int:
+    import numpy as np
+    import rasterio
+
+    from .labels import LABEL_BANDS, confusion_quicklook, rasterize_ems, score, threshold_sweep
+
+    pair = _load_pair(args.aoi, args.event, args.flood_pass)
+    if pair is None or pair["reference"] is None:
+        print("no usable pair (run 'sarflood pairs')", file=sys.stderr)
+        return 2
+    cdir = data_root() / "change" / args.aoi
+    stem = f"{pair['flood']['key']}__{pair['reference']['key']}_{int(args.spacing)}m"
+    change_tif = cdir / f"{stem}_change.tif"
+    if not change_tif.exists():
+        print(f"{change_tif} not found; run 'sarflood change' first", file=sys.stderr)
+        return 2
+    z = Path(args.ems_zip)
+    if not z.exists():
+        print(f"{z} not found", file=sys.stderr)
+        return 2
+
+    with rasterio.open(change_tif) as src:
+        names = list(src.descriptions)
+        band = lambda n: src.read(names.index(n) + 1)
+        dvv, fvv = band("dvv_db"), band("flood_vv_db")
+        valid, cand = band("valid") > 0, band("candidate") > 0
+        profile, tags = src.profile, src.tags()
+        transform, crs, shape = src.transform, src.crs, src.shape
+    px_area = abs(transform.a * transform.e)
+
+    labels = rasterize_ems(z, shape, transform, crs, supersample=args.supersample)
+    out_dir = data_root() / "eval" / args.aoi
+    out_dir.mkdir(parents=True, exist_ok=True)
+    lab_tif = out_dir / f"{stem}_{z.stem}_labels.tif"
+    profile.update(count=len(LABEL_BANDS), dtype="float32")
+    with rasterio.open(lab_tif, "w", **profile) as dst:
+        for i, n in enumerate(LABEL_BANDS, 1):
+            dst.write(labels[n].astype(np.float32), i)
+            dst.set_band_description(i, n)
+        dst.update_tags(ems_zip=z.name, change=change_tif.name)
+
+    aoi_px = int(labels["aoi"].sum())
+    print(f"labels -> {lab_tif}")
+    print(f"EMS AOI {aoi_px:,} px ({aoi_px * px_area / 1e6:.1f} km2): flooded "
+          f"{100 * labels['flood'][labels['aoi'] > 0].mean():.1f}%, not analysed "
+          f"{int(labels['not_analysed'].sum()):,} px, permanent water {int(labels['perm_water'].sum()):,} px")
+    cd, wd = tags.get("change_db"), tags.get("water_db")
+    results = {}
+    for name, lo, hi in [("all", None, None), ("pure_only", 0.2, 0.8)]:
+        s = score(cand, labels, valid, px_area, lo, hi)
+        results[name] = s.to_dict()
+        print(f"[{name:<9}] threshold preview (dVV <= {cd}, VV <= {wd}): IoU {s.iou:.3f}  "
+              f"F1 {s.f1:.3f}  precision {s.precision:.3f}  recall {s.recall:.3f}   "
+              f"label {s.label_km2:.1f} km2, predicted {s.pred_km2:.1f} km2, "
+              f"eval {s.n_eval:,} px" + (f", {s.excluded_mixed:,} mixed excluded" if lo else ""))
+    if args.sweep:
+        rows = threshold_sweep(dvv, fvv, labels, valid, px_area)
+        results["sweep"] = rows
+        best = max(rows, key=lambda r: r["iou"] if r["iou"] == r["iou"] else -1)
+        print("sweep (IoU; tuned on these labels, so optimistic):")
+        waters = sorted({r["water_db"] for r in rows}, reverse=True)
+        print("  dVV\\VV  " + "".join(f"{w:>8.0f}" for w in waters))
+        for c in sorted({r["change_db"] for r in rows}, reverse=True):
+            row = {r["water_db"]: r["iou"] for r in rows if r["change_db"] == c}
+            print(f"  {c:>6.0f}  " + "".join(f"{row[w]:>8.3f}" for w in waters))
+        print(f"  best: dVV <= {best['change_db']}, VV <= {best['water_db']}: IoU {best['iou']:.3f}")
+    png = confusion_quicklook(cand, labels, valid, out_dir / f"{stem}_{z.stem}_confusion.png",
+                              title=f"{args.aoi}: threshold preview vs {z.stem}")
+    out = write_json(out_dir / f"{stem}_{z.stem}_score.json",
+                     {"change": change_tif.name, "ems_zip": z.name, **results})
+    print(f"-> {out}\n-> {png}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="sarflood")
     p.add_argument("--config", default=None, help="path to aois.yaml")
@@ -469,6 +573,20 @@ def main(argv: list[str] | None = None) -> int:
     ch.add_argument("--water-db", type=float, default=-18.0,
                     help="candidate needs flood VV <= this (default -18)")
     ch.set_defaults(func=cmd_change)
+
+    ei = sub.add_parser("ems-info", help="EMS activation AOIs, overlap with our AOIs, product imagery")
+    ei.add_argument("--code", action="append", required=True, help="e.g. EMSR629 (repeatable)")
+    ei.set_defaults(func=cmd_ems_info)
+
+    ev = sub.add_parser("evaluate", help="rasterize EMS labels onto the change grid and score")
+    ev.add_argument("--aoi", required=True)
+    ev.add_argument("--event", required=True)
+    ev.add_argument("--flood-pass", required=True)
+    ev.add_argument("--ems-zip", required=True, help="EMS DEL vector package (.zip)")
+    ev.add_argument("--spacing", type=float, default=20.0)
+    ev.add_argument("--supersample", type=int, default=5, help="sub-pixels per side (default 5)")
+    ev.add_argument("--sweep", action="store_true", help="IoU over a grid of thresholds")
+    ev.set_defaults(func=cmd_evaluate)
 
     args = p.parse_args(argv)
     if args.config is None:

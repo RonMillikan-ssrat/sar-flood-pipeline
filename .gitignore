@@ -15,8 +15,6 @@ data/*
 *.tiff
 *.zarr/
 *.nc
-*.tar
-*.gz
 
 # Airflow (AIRFLOW_HOME lives in the repo for local dev)
 airflow_home/
