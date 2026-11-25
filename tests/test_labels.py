@@ -116,7 +116,7 @@ def test_cli_evaluate_end_to_end(tmp_path, monkeypatch, capsys):
     fvv = np.where(flood, -22.0, -10.0).astype(np.float32)
     bands = {"ref_vv_db": np.full((H, W), -10.0), "flood_vv_db": fvv, "dvv_db": dvv,
              "ref_vh_db": np.full((H, W), -17.0), "flood_vh_db": np.full((H, W), -17.0),
-             "dvh_db": np.zeros((H, W)), "valid": np.ones((H, W)),
+             "dvh_db": np.zeros((H, W)), "valid": np.ones((H, W)), "valid_vh": np.ones((H, W)),
              "candidate": ((dvv <= -3) & (fvv <= -18)).astype(float)}
     cdir = tmp_path / "change" / "larkana"
     cdir.mkdir(parents=True)
@@ -139,5 +139,5 @@ def test_cli_evaluate_end_to_end(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "IoU 1.000" in out
     rep = json.loads(next((tmp_path / "eval" / "larkana").glob("*_score.json")).read_text())
-    assert rep["all"]["iou"] == 1.0 and len(rep["sweep"]) == 30
+    assert rep["all"]["iou"] == 1.0 and len(rep["sweep"]) == 42
     assert next((tmp_path / "eval" / "larkana").glob("*_confusion.png")).stat().st_size > 1000

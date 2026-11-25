@@ -341,6 +341,11 @@ def cmd_terrain_correct(args) -> int:
     return rc
 
 
+def _change_stem(pair: dict, spacing: float, smooth: int) -> str:
+    s = f"{pair['flood']['key']}__{pair['reference']['key']}_{int(spacing)}m"
+    return s if smooth <= 1 else f"{s}_s{smooth}"
+
+
 def cmd_change(args) -> int:
     from .change import quicklook, run_change
     from .snap import tc_stem, utm_epsg
@@ -367,15 +372,17 @@ def cmd_change(args) -> int:
         return 2
 
     out_dir = data_root() / "change" / args.aoi
-    stem = f"{pair['flood']['key']}__{pair['reference']['key']}_{int(args.spacing)}m"
+    stem = _change_stem(pair, args.spacing, args.smooth)
     out_tif = out_dir / f"{stem}_change.tif"
-    st = run_change(f_tif, r_tif, out_tif, args.change_db, args.water_db)
+    st = run_change(f_tif, r_tif, out_tif, args.change_db, args.water_db, args.smooth)
     png = quicklook(out_tif, out_dir / f"{stem}_quicklook.png")
     write_json(out_dir / f"{stem}_stats.json", {"flood": f_tif.name, "reference": r_tif.name,
                                                 **st.to_dict()})
-    print(f"overlap {st.pixels:,} px   valid {st.valid:,} ({100 * st.valid / st.pixels:.1f}%)   "
-          f"masked: layover/shadow {st.masked_layover_shadow:,}, "
-          f"non-positive {st.masked_nonpositive:,}")
+    print(f"overlap {st.pixels:,} px   smooth {st.smooth}x{st.smooth}   "
+          f"valid VV {st.valid:,} ({100 * st.valid / st.pixels:.1f}%), "
+          f"VH {st.valid_vh:,} ({100 * st.valid_vh / st.pixels:.1f}%)")
+    print(f"masked: layover/shadow {st.masked_layover_shadow:,}, non-positive VV "
+          f"{st.masked_nonpositive:,}, VH {st.masked_nonpositive_vh:,}")
     print(f"VV change dB  p5 {st.dvv_p05:+.2f}  median {st.dvv_p50:+.2f}  p95 {st.dvv_p95:+.2f}")
     print(f"candidate (dVV <= {st.change_db} dB and flood VV <= {st.water_db} dB): "
           f"{st.candidate_pixels:,} px = {st.candidate_km2:,.1f} km2   [threshold preview]")
@@ -424,7 +431,7 @@ def cmd_evaluate(args) -> int:
         print("no usable pair (run 'sarflood pairs')", file=sys.stderr)
         return 2
     cdir = data_root() / "change" / args.aoi
-    stem = f"{pair['flood']['key']}__{pair['reference']['key']}_{int(args.spacing)}m"
+    stem = _change_stem(pair, args.spacing, args.smooth)
     change_tif = cdir / f"{stem}_change.tif"
     if not change_tif.exists():
         print(f"{change_tif} not found; run 'sarflood change' first", file=sys.stderr)
@@ -478,7 +485,11 @@ def cmd_evaluate(args) -> int:
         for c in sorted({r["change_db"] for r in rows}, reverse=True):
             row = {r["water_db"]: r["iou"] for r in rows if r["change_db"] == c}
             print(f"  {c:>6.0f}  " + "".join(f"{row[w]:>8.3f}" for w in waters))
-        print(f"  best: dVV <= {best['change_db']}, VV <= {best['water_db']}: IoU {best['iou']:.3f}")
+        print(f"  best: dVV <= {best['change_db']}, VV <= {best['water_db']}: IoU {best['iou']:.3f}"
+              f"  (P {best['precision']:.3f}, R {best['recall']:.3f})")
+        cs = sorted({r["change_db"] for r in rows})
+        if best["change_db"] in (cs[0], cs[-1]) or best["water_db"] in (waters[0], waters[-1]):
+            print("  note: best is on the edge of the grid; the optimum may lie beyond it")
     png = confusion_quicklook(cand, labels, valid, out_dir / f"{stem}_{z.stem}_confusion.png",
                               title=f"{args.aoi}: threshold preview vs {z.stem}")
     out = write_json(out_dir / f"{stem}_{z.stem}_score.json",
@@ -572,6 +583,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="candidate needs VV change <= this (default -3)")
     ch.add_argument("--water-db", type=float, default=-18.0,
                     help="candidate needs flood VV <= this (default -18)")
+    ch.add_argument("--smooth", type=int, default=1,
+                    help="N x N mean of linear sigma0 before dB, N odd (default 1 = off)")
     ch.set_defaults(func=cmd_change)
 
     ei = sub.add_parser("ems-info", help="EMS activation AOIs, overlap with our AOIs, product imagery")
@@ -586,6 +599,8 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("--spacing", type=float, default=20.0)
     ev.add_argument("--supersample", type=int, default=5, help="sub-pixels per side (default 5)")
     ev.add_argument("--sweep", action="store_true", help="IoU over a grid of thresholds")
+    ev.add_argument("--smooth", type=int, default=1,
+                    help="evaluate the change map made with this --smooth (default 1)")
     ev.set_defaults(func=cmd_evaluate)
 
     args = p.parse_args(argv)

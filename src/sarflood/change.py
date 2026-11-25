@@ -13,10 +13,16 @@ the intersection, and refuse to run when the grids are not aligned rather than
 resampling silently.
 
 Per pixel, on the overlap:
-    valid      both passes > 0 in VV and VH, finite, and layover/shadow mask 0 in both
+    smoothing  optional N x N mean of linear sigma0 in each pass before dB (N=1: off).
+               Averages speckle; negative (unclipped) values take part, which is
+               why noise removal is not clipped upstream. NaN / layover-shadow pixels
+               are left out of the mean; a pixel needs > half its window valid.
+    valid      (VV) both passes > 0 and finite in VV, layover/shadow mask 0 in both.
+    valid_vh   the same for VH. Kept separate: VH goes negative mostly over calm
+               water, and requiring it for VV products would drop likely flood pixels.
     *_db       10 log10(sigma0)
     dvv, dvh   flood dB - reference dB  (negative = darker in the flood pass)
-    candidate  dvv <= change_db and flood VV <= water_db
+    candidate  valid & dvv <= change_db & flood VV <= water_db
                A simple threshold preview for looking at the data, NOT a validated
                flood map. The defaults are starting values to tune against the EMS
                polygons.
@@ -31,7 +37,30 @@ import numpy as np
 
 BAND_VH, BAND_VV, BAND_LIA, BAND_MASK = 1, 2, 3, 4
 OUT_BANDS = ["ref_vv_db", "flood_vv_db", "dvv_db", "ref_vh_db", "flood_vh_db", "dvh_db",
-             "valid", "candidate"]
+             "valid", "valid_vh", "candidate"]
+
+
+def box_mean(x: np.ndarray, n: int) -> np.ndarray:
+    """NaN-aware N x N moving mean (N odd) via integral images. A pixel gets a value
+    only if more than half of its window is finite; otherwise NaN."""
+    if n <= 1:
+        return x.astype(np.float32)
+    if n % 2 == 0:
+        raise ValueError("smoothing window must be odd")
+    ok = np.isfinite(x)
+    vals = np.where(ok, x, 0.0).astype(np.float64)
+    r = n // 2
+
+    def box_sum(a: np.ndarray) -> np.ndarray:
+        p = np.pad(a, r + 1, mode="constant")[:-1, :-1]  # leading zero row/col for the cumsum
+        c = p.cumsum(0).cumsum(1)
+        return c[n:, n:] - c[:-n, n:] - c[n:, :-n] + c[:-n, :-n]
+
+    s, cnt = box_sum(vals), box_sum(ok.astype(np.float64))
+    out = np.full(x.shape, np.nan, np.float32)
+    good = cnt > (n * n) / 2
+    out[good] = (s[good] / cnt[good]).astype(np.float32)
+    return out
 
 
 @dataclass
@@ -90,8 +119,11 @@ def to_db(x: np.ndarray) -> np.ndarray:
 class ChangeStats:
     pixels: int
     valid: int
+    valid_vh: int
     masked_layover_shadow: int
-    masked_nonpositive: int
+    masked_nonpositive: int      # VV
+    masked_nonpositive_vh: int
+    smooth: int
     dvv_p05: float
     dvv_p50: float
     dvv_p95: float
@@ -106,43 +138,53 @@ class ChangeStats:
 
 def compute_change(flood: dict[str, np.ndarray], ref: dict[str, np.ndarray],
                    pixel_area_m2: float, change_db: float = -3.0,
-                   water_db: float = -18.0) -> tuple[dict[str, np.ndarray], ChangeStats]:
+                   water_db: float = -18.0, smooth: int = 1) -> tuple[dict[str, np.ndarray], ChangeStats]:
     """flood/ref: dicts with linear 'vv', 'vh' and 'mask' arrays of equal shape."""
-    fvv, rvv = to_db(flood["vv"]), to_db(ref["vv"])
-    fvh, rvh = to_db(flood["vh"]), to_db(ref["vh"])
-    finite = np.isfinite(fvv) & np.isfinite(rvv) & np.isfinite(fvh) & np.isfinite(rvh)
     ls = (flood["mask"] != 0) | (ref["mask"] != 0)
-    valid = finite & ~ls
 
-    def masked(a):
+    def prep(d: dict, pol: str) -> np.ndarray:
+        x = d[pol].astype(np.float32).copy()
+        x[d["mask"] != 0] = np.nan          # layover/shadow out of the window means
+        return box_mean(x, smooth)
+
+    fvv, rvv = to_db(prep(flood, "vv")), to_db(prep(ref, "vv"))
+    fvh, rvh = to_db(prep(flood, "vh")), to_db(prep(ref, "vh"))
+    finite_vv = np.isfinite(fvv) & np.isfinite(rvv)
+    finite_vh = np.isfinite(fvh) & np.isfinite(rvh)
+    valid, valid_vh = finite_vv & ~ls, finite_vh & ~ls
+
+    def masked(a, m):
         out = a.copy()
-        out[~valid] = np.nan
+        out[~m] = np.nan
         return out
 
-    dvv = masked(fvv - rvv)
-    dvh = masked(fvh - rvh)
+    dvv = masked(fvv - rvv, valid)
+    dvh = masked(fvh - rvh, valid_vh)
     cand = valid & (dvv <= change_db) & (fvv <= water_db)
     d = dvv[valid]
     pct = np.percentile(d, [5, 50, 95]) if d.size else [np.nan] * 3
     stats = ChangeStats(
-        pixels=int(valid.size), valid=int(valid.sum()),
-        masked_layover_shadow=int((finite & ls).sum()),
-        masked_nonpositive=int((~finite).sum()),
+        pixels=int(valid.size), valid=int(valid.sum()), valid_vh=int(valid_vh.sum()),
+        masked_layover_shadow=int(ls.sum()),
+        masked_nonpositive=int((~finite_vv & ~ls).sum()),
+        masked_nonpositive_vh=int((~finite_vh & ~ls).sum()),
+        smooth=smooth,
         dvv_p05=float(pct[0]), dvv_p50=float(pct[1]), dvv_p95=float(pct[2]),
         candidate_pixels=int(cand.sum()),
         candidate_km2=float(cand.sum() * pixel_area_m2 / 1e6),
         change_db=change_db, water_db=water_db,
     )
     bands = {
-        "ref_vv_db": masked(rvv), "flood_vv_db": masked(fvv), "dvv_db": dvv,
-        "ref_vh_db": masked(rvh), "flood_vh_db": masked(fvh), "dvh_db": dvh,
-        "valid": valid.astype(np.float32), "candidate": cand.astype(np.float32),
+        "ref_vv_db": masked(rvv, valid), "flood_vv_db": masked(fvv, valid), "dvv_db": dvv,
+        "ref_vh_db": masked(rvh, valid_vh), "flood_vh_db": masked(fvh, valid_vh), "dvh_db": dvh,
+        "valid": valid.astype(np.float32), "valid_vh": valid_vh.astype(np.float32),
+        "candidate": cand.astype(np.float32),
     }
     return bands, stats
 
 
 def run_change(flood_tif: Path, ref_tif: Path, out_tif: Path,
-               change_db: float = -3.0, water_db: float = -18.0) -> ChangeStats:
+               change_db: float = -3.0, water_db: float = -18.0, smooth: int = 1) -> ChangeStats:
     import rasterio
 
     with rasterio.open(flood_tif) as fs, rasterio.open(ref_tif) as rs:
@@ -153,7 +195,7 @@ def run_change(flood_tif: Path, ref_tif: Path, out_tif: Path,
                "mask": _read(rs, BAND_MASK, ov.ref)}
         crs = fs.crs
         pixel_area = abs(fs.transform.a * fs.transform.e)
-    bands, stats = compute_change(flood, ref, pixel_area, change_db, water_db)
+    bands, stats = compute_change(flood, ref, pixel_area, change_db, water_db, smooth)
 
     h, w = bands["dvv_db"].shape
     out_tif.parent.mkdir(parents=True, exist_ok=True)
@@ -166,7 +208,7 @@ def run_change(flood_tif: Path, ref_tif: Path, out_tif: Path,
             dst.write(bands[name], i)
             dst.set_band_description(i, name)
         dst.update_tags(flood=Path(flood_tif).name, reference=Path(ref_tif).name,
-                        change_db=str(change_db), water_db=str(water_db),
+                        change_db=str(change_db), water_db=str(water_db), smooth=str(smooth),
                         note="candidate = simple threshold preview, not a validated flood map")
     return stats
 

@@ -130,8 +130,8 @@ def score(pred: np.ndarray, labels: dict[str, np.ndarray], valid: np.ndarray,
 
 def threshold_sweep(dvv: np.ndarray, fvv: np.ndarray, labels: dict[str, np.ndarray],
                     valid: np.ndarray, pixel_area_m2: float,
-                    change_grid=(-1.0, -2.0, -3.0, -4.0, -6.0, -8.0),
-                    water_grid=(-14.0, -16.0, -18.0, -20.0, -22.0)) -> list[dict]:
+                    change_grid=(1.0, 0.0, -1.0, -2.0, -3.0, -4.0, -6.0),
+                    water_grid=(-10.0, -12.0, -14.0, -16.0, -18.0, -20.0)) -> list[dict]:
     """IoU for each (change_db, water_db) pair. Tuning on the evaluation labels is
     optimistic; use it to understand the data, not as a reported accuracy."""
     rows = []

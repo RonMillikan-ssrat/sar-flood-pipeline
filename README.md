@@ -20,7 +20,7 @@ terrain, a drift check flags it, and the model registry refuses to promote it.
 | Precise orbit files from CDSE into SNAP's auxdata folder (step.esa.int fallback) | `orbits.py`, `sarflood orbits` | **done** |
 | Terrain correction: per-slice TNR (no clip) → slice assembly → precise orbit → σ⁰ → Copernicus 30 m DEM, UTM, fixed grid → AOI clip | `snap.py`, `sarflood terrain-correct` | **done** (Sindh 78D flood pass) |
 | Server-side processed backscatter for scale | Sentinel Hub / openEO | todo |
-| Change detection on the shared grid: VV/VH dB, change, masks, quick-look, threshold preview | `change.py`, `sarflood change` | **built** |
+| Change detection on the shared grid: optional N×N speckle averaging (linear, unclipped), per-polarization validity, VV/VH dB and change, quick-look, threshold preview | `change.py`, `sarflood change` | **done** |
 | EMS activation check: AOI extents vs ours, product imagery (circularity check) | `ems.py`, `sarflood ems-info` | **built** |
 | Labels: EMS delineation (flood fraction via sub-pixel rasterization, AOI, not-analysed, permanent water) on the change grid; IoU/F1/precision/recall; outcome map | `labels.py`, `sarflood evaluate` | **built** |
 | Baseline: Otsu threshold on VV backscatter | | todo |
@@ -137,6 +137,12 @@ airflow backfill create --dag-id s1_catalog --from-date 2022-08-15 --to-date 202
   Sentinel-1 pass we classify. Scored region: inside the EMS AOI, assessed, valid
   in the change map, excluding permanent water (Lake/River; "Land Subject to
   Inundation" is floodable land and stays in).
+- **First score (Larkana, EMSR629 AOI01).** Threshold preview ΔVV ≤ −3 dB and
+  VV ≤ −18 dB, no smoothing: IoU 0.486, precision 0.93, recall 0.50. Two causes
+  identified from the outcome map: speckle splits uniform flood across the
+  threshold (→ `--smooth`), and VV-only predictions were wrongly dropped where
+  VH was negative (→ per-polarization validity). Thresholds tuned on Larkana
+  are to be tested on other EMSR629 AOIs, not reported from Larkana itself.
 - **Pairing rule.** A reference must match the flood pass's relative orbit, orbit
   direction and polarisation, fall in the event's dry-season `reference` window,
   and cover at least 50% of the AOI. The latest qualifying pass wins (least
