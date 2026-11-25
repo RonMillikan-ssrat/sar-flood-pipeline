@@ -16,10 +16,11 @@ terrain, a drift check flags it, and the model registry refuses to promote it.
 | Group slices into passes; pair each flood pass with a same-track dry reference | `passes.py`, `sarflood pairs` | **done** |
 | Download raw `.SAFE` for one flood/reference pair | `download.py`, `sarflood download` | **done** |
 | Thermal-noise removal + σ⁰ calibration, radar geometry | `calibrate.py`, `sarflood calibrate` | **done** |
-| Same slice through SNAP `gpt`; compare σ⁰ pixel for pixel | `snap/graphs/tnr_cal.xml`, `compare.py`, `sarflood compare` | **built**, awaiting first run |
+| Same slice through SNAP `gpt`; compare σ⁰ pixel for pixel | `snap/graphs/tnr_cal.xml`, `compare.py`, `sarflood compare` | **done**: VV/VH 100% within 0.1 dB |
 | Precise orbit files from CDSE into SNAP's auxdata folder (step.esa.int fallback) | `orbits.py`, `sarflood orbits` | **done** |
-| Terrain correction: slice assembly, precise orbit, TNR (no clip), σ⁰, Copernicus 30 m DEM, UTM, fixed grid, AOI clip | `snap.py`, `sarflood terrain-correct` | **built**, awaiting first run |
+| Terrain correction: per-slice TNR (no clip) → slice assembly → precise orbit → σ⁰ → Copernicus 30 m DEM, UTM, fixed grid → AOI clip | `snap.py`, `sarflood terrain-correct` | **done** (Sindh 78D flood pass) |
 | Server-side processed backscatter for scale | Sentinel Hub / openEO | todo |
+| Change detection on the shared grid: VV/VH dB, change, masks, quick-look, threshold preview | `change.py`, `sarflood change` | **built** |
 | Labels: Copernicus EMS delineations, Sen1Floods11 | | todo |
 | Baseline: Otsu threshold on VV backscatter | | todo |
 | Train U-Net | GEAP Pipelines (Kubeflow) | todo |
@@ -48,6 +49,7 @@ src/sarflood/
   compare.py   our sigma0 vs SNAP's, pixel for pixel, in dB
   snap.py      generates SNAP gpt graphs (any slice count) and runs gpt
   orbits.py    finds/downloads AUX_POEORB orbit files for a pass from CDSE
+  change.py    flood vs reference on the shared grid: dB, change, masks, quick-look
 snap/graphs/  SNAP gpt graphs used as references
   cli.py       run the same logic without Airflow
 tests/      pytest, no network needed

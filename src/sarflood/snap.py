@@ -42,6 +42,11 @@ def utm_epsg(lon: float, lat: float) -> int:
     return (32600 if lat >= 0 else 32700) + zone
 
 
+def tc_stem(pass_key: str, spacing_m: float, clip: bool, epsg: int) -> str:
+    """File stem of a terrain-corrected pass (the GeoTIFF writer adds .tif)."""
+    return f"{pass_key}_tc_{int(spacing_m)}m_{'clip' if clip else 'noclip'}_epsg{epsg}"
+
+
 def _node(node_id: str, operator: str, sources: list[str], params: dict[str, object]) -> str:
     src = "".join(f'<sourceProduct{"" if i == 0 else f".{i}"} refid="{s}"/>'
                   for i, s in enumerate(sources))

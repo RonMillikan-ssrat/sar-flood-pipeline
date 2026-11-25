@@ -287,7 +287,7 @@ def cmd_orbits(args) -> int:
 
 
 def cmd_terrain_correct(args) -> int:
-    from .snap import build_tc_graph, gpt_path, run_gpt, utm_epsg
+    from .snap import build_tc_graph, gpt_path, run_gpt, tc_stem, utm_epsg
 
     aois = load_aois(args.config)
     aoi = aois.get(args.aoi)
@@ -324,8 +324,7 @@ def cmd_terrain_correct(args) -> int:
             print(f"{role} {ps['key']}: missing {[z.name for z in missing]}; run 'sarflood download'",
                   file=sys.stderr)
             return 2
-        clip = "clip" if args.clip else "noclip"
-        stem = f"{ps['key']}_tc_{int(args.spacing)}m_{clip}_epsg{epsg}"
+        stem = tc_stem(ps["key"], args.spacing, args.clip, epsg)
         out = (out_dir / stem).resolve()  # absolute for gpt; the GeoTIFF writer adds .tif
         graph = build_tc_graph(zips, out, aoi.to_wkt(), epsg, args.spacing, args.clip)
         gfile = out_dir / f"{stem}.graph.xml"
@@ -340,6 +339,48 @@ def cmd_terrain_correct(args) -> int:
             print(f"gpt failed with exit code {rc}", file=sys.stderr)
             return rc
     return rc
+
+
+def cmd_change(args) -> int:
+    from .change import quicklook, run_change
+    from .snap import tc_stem, utm_epsg
+
+    aois = load_aois(args.config)
+    aoi = aois.get(args.aoi)
+    if aoi is None:
+        print(f"unknown AOI {args.aoi!r}", file=sys.stderr)
+        return 2
+    pair = _load_pair(args.aoi, args.event, args.flood_pass)
+    if pair is None:
+        return 2
+    if pair["reference"] is None:
+        print(f"{args.flood_pass} has no reference ({pair['reason']})", file=sys.stderr)
+        return 2
+    x0, y0, x1, y1 = aoi.bbox
+    epsg = args.epsg or utm_epsg((x0 + x1) / 2, (y0 + y1) / 2)
+    tc = data_root() / "tc" / args.aoi
+    f_tif = tc / (tc_stem(pair["flood"]["key"], args.spacing, args.clip, epsg) + ".tif")
+    r_tif = tc / (tc_stem(pair["reference"]["key"], args.spacing, args.clip, epsg) + ".tif")
+    missing = [p.name for p in (f_tif, r_tif) if not p.exists()]
+    if missing:
+        print(f"missing {missing}; run 'sarflood terrain-correct' first", file=sys.stderr)
+        return 2
+
+    out_dir = data_root() / "change" / args.aoi
+    stem = f"{pair['flood']['key']}__{pair['reference']['key']}_{int(args.spacing)}m"
+    out_tif = out_dir / f"{stem}_change.tif"
+    st = run_change(f_tif, r_tif, out_tif, args.change_db, args.water_db)
+    png = quicklook(out_tif, out_dir / f"{stem}_quicklook.png")
+    write_json(out_dir / f"{stem}_stats.json", {"flood": f_tif.name, "reference": r_tif.name,
+                                                **st.to_dict()})
+    print(f"overlap {st.pixels:,} px   valid {st.valid:,} ({100 * st.valid / st.pixels:.1f}%)   "
+          f"masked: layover/shadow {st.masked_layover_shadow:,}, "
+          f"non-positive {st.masked_nonpositive:,}")
+    print(f"VV change dB  p5 {st.dvv_p05:+.2f}  median {st.dvv_p50:+.2f}  p95 {st.dvv_p95:+.2f}")
+    print(f"candidate (dVV <= {st.change_db} dB and flood VV <= {st.water_db} dB): "
+          f"{st.candidate_pixels:,} px = {st.candidate_km2:,.1f} km2   [threshold preview]")
+    print(f"-> {out_tif}\n-> {png}")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -415,6 +456,19 @@ def main(argv: list[str] | None = None) -> int:
     ob.add_argument("--role", choices=["flood", "reference", "both"], default="both")
     ob.add_argument("--dry-run", action="store_true", help="find the files, don't download")
     ob.set_defaults(func=cmd_orbits)
+
+    ch = sub.add_parser("change", help="flood-vs-reference change on the shared grid + quick-look")
+    ch.add_argument("--aoi", required=True)
+    ch.add_argument("--event", required=True)
+    ch.add_argument("--flood-pass", required=True)
+    ch.add_argument("--spacing", type=float, default=20.0)
+    ch.add_argument("--epsg", type=int)
+    ch.add_argument("--clip", action="store_true", help="use the clipped TC outputs")
+    ch.add_argument("--change-db", type=float, default=-3.0,
+                    help="candidate needs VV change <= this (default -3)")
+    ch.add_argument("--water-db", type=float, default=-18.0,
+                    help="candidate needs flood VV <= this (default -18)")
+    ch.set_defaults(func=cmd_change)
 
     args = p.parse_args(argv)
     if args.config is None:
