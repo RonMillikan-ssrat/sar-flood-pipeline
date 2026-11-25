@@ -1,9 +1,13 @@
 """Build and run SNAP gpt graphs for terrain-corrected sigma0 of one pass.
 
-Chain (one Read per slice; SliceAssembly only when there are 2+ slices):
+Chain (per slice: Read -> ThermalNoiseRemoval; SliceAssembly only for 2+ slices):
 
-    Read x N -> SliceAssembly -> Apply-Orbit-File -> ThermalNoiseRemoval
-             -> Calibration (sigma0, linear) -> Terrain-Correction -> Subset (AOI) -> Write
+    Read_i -> ThermalNoiseRemoval_i --> SliceAssembly -> Apply-Orbit-File
+           -> Calibration (sigma0, linear) -> Terrain-Correction -> Subset (AOI) -> Write
+
+Noise removal must come before slice assembly. SNAP 14 refuses otherwise
+("Noise removal should be applied prior to slice assembly"), because each
+slice has its own noise annotation.
 
 Choices that matter (operator parameters as printed by SNAP 14's `gpt <op> -h`):
 - clipNegativeValues=false by default: Terrain-Correction resamples (averages),
@@ -56,21 +60,21 @@ def build_tc_graph(slices: list[Path], output: Path, aoi_wkt: str, epsg: int,
     if not slices:
         raise ValueError("need at least one slice")
     nodes = []
-    reads = []
+    denoised = []
     for i, z in enumerate(slices, 1):
-        rid = f"Read{i}"
-        reads.append(rid)
-        nodes.append(_node(rid, "Read", [], {"file": str(z)}))
-    prev = reads[0]
-    if len(reads) > 1:
-        nodes.append(_node("SliceAssembly", "SliceAssembly", reads,
+        nodes.append(_node(f"Read{i}", "Read", [], {"file": str(z)}))
+        nodes.append(_node(f"ThermalNoiseRemoval{i}", "ThermalNoiseRemoval", [f"Read{i}"], {
+            "selectedPolarisations": polarisations,
+            "removeThermalNoise": True, "clipNegativeValues": clip}))
+        denoised.append(f"ThermalNoiseRemoval{i}")
+    prev = denoised[0]
+    if len(denoised) > 1:
+        nodes.append(_node("SliceAssembly", "SliceAssembly", denoised,
                            {"selectedPolarisations": polarisations}))
         prev = "SliceAssembly"
     chain = [
         ("Apply-Orbit-File", {"orbitType": "Sentinel Precise (Auto Download)",
                               "continueOnFail": False}),
-        ("ThermalNoiseRemoval", {"selectedPolarisations": polarisations,
-                                 "removeThermalNoise": True, "clipNegativeValues": clip}),
         ("Calibration", {"outputSigmaBand": True, "outputImageScaleInDb": False}),
         ("Terrain-Correction", {
             "demName": "Copernicus 30m Global DEM",

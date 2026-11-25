@@ -38,26 +38,31 @@ def chain_order(xml):
 def test_single_slice_has_no_slice_assembly():
     g = build_tc_graph([Path("/d/a.zip")], Path("/o/x"), WKT, 32642)
     assert "SliceAssembly" not in nodes(g)
-    assert chain_order(g) == ["Read1", "Apply-Orbit-File", "ThermalNoiseRemoval", "Calibration",
+    assert chain_order(g) == ["Read1", "ThermalNoiseRemoval1", "Apply-Orbit-File", "Calibration",
                               "Terrain-Correction", "Subset", "Write"]
 
 
-def test_three_slices_feed_slice_assembly_in_order():
+def test_three_slices_denoised_before_slice_assembly():
     zips = [Path(f"/d/s{i}.zip") for i in (1, 2, 3)]
     g = build_tc_graph(zips, Path("/o/x"), WKT, 32642)
     ns = nodes(g)
     srcs = list(ns["SliceAssembly"].find("sources"))
     assert [s.tag for s in srcs] == ["sourceProduct", "sourceProduct.1", "sourceProduct.2"]
-    assert [s.get("refid") for s in srcs] == ["Read1", "Read2", "Read3"]
+    assert [s.get("refid") for s in srcs] == [f"ThermalNoiseRemoval{i}" for i in (1, 2, 3)]
+    for i in (1, 2, 3):  # each TNR reads its own slice
+        assert ns[f"ThermalNoiseRemoval{i}"].find("sources")[0].get("refid") == f"Read{i}"
     assert [ns[f"Read{i}"].findtext("parameters/file") for i in (1, 2, 3)] == [str(z) for z in zips]
-    assert chain_order(g)[1] == "SliceAssembly"
+    assert chain_order(g)[:4] == ["Read1", "ThermalNoiseRemoval1", "SliceAssembly",
+                                  "Apply-Orbit-File"]
+    assert "ThermalNoiseRemoval" not in ns  # no TNR after assembly
 
 
 def test_key_parameters():
     g = build_tc_graph([Path("/d/a.zip"), Path("/d/b.zip")], Path("/o/x"), WKT, 32642, spacing_m=10)
     ns = nodes(g)
-    tnr = ns["ThermalNoiseRemoval"].find("parameters")
-    assert tnr.findtext("clipNegativeValues") == "false"  # default: no clipping before TC
+    for i in (1, 2):
+        tnr = ns[f"ThermalNoiseRemoval{i}"].find("parameters")
+        assert tnr.findtext("clipNegativeValues") == "false"  # default: no clipping before TC
     tc = ns["Terrain-Correction"].find("parameters")
     assert tc.findtext("mapProjection") == "EPSG:32642"
     assert tc.findtext("pixelSpacingInMeter") == "10"
