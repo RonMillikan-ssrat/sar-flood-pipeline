@@ -17,7 +17,8 @@ terrain, a drift check flags it, and the model registry refuses to promote it.
 | Download raw `.SAFE` for one flood/reference pair | `download.py`, `sarflood download` | **done** |
 | Thermal-noise removal + σ⁰ calibration, radar geometry | `calibrate.py`, `sarflood calibrate` | **done** |
 | Same slice through SNAP `gpt`; compare σ⁰ pixel for pixel | `snap/graphs/tnr_cal.xml`, `compare.py`, `sarflood compare` | **built**, awaiting first run |
-| Terrain correction | SNAP `Terrain-Correction` | todo |
+| Precise orbit files from CDSE into SNAP's auxdata folder (step.esa.int fallback) | `orbits.py`, `sarflood orbits` | **done** |
+| Terrain correction: slice assembly, precise orbit, TNR (no clip), σ⁰, Copernicus 30 m DEM, UTM, fixed grid, AOI clip | `snap.py`, `sarflood terrain-correct` | **built**, awaiting first run |
 | Server-side processed backscatter for scale | Sentinel Hub / openEO | todo |
 | Labels: Copernicus EMS delineations, Sen1Floods11 | | todo |
 | Baseline: Otsu threshold on VV backscatter | | todo |
@@ -45,6 +46,8 @@ src/sarflood/
   download.py  .SAFE zip download: manual redirects, size check, skip-if-complete
   calibrate.py DN -> sigma0 from the calibration/noise LUT XMLs (radar geometry)
   compare.py   our sigma0 vs SNAP's, pixel for pixel, in dB
+  snap.py      generates SNAP gpt graphs (any slice count) and runs gpt
+  orbits.py    finds/downloads AUX_POEORB orbit files for a pass from CDSE
 snap/graphs/  SNAP gpt graphs used as references
   cli.py       run the same logic without Airflow
 tests/      pytest, no network needed
@@ -120,6 +123,10 @@ airflow backfill create --dag-id s1_catalog --from-date 2022-08-15 --to-date 202
   uses `--no-clip` until after terrain correction.
 - **Validated against SNAP 14.** VV σ⁰ on a 2048 × 2048 window: max
   |difference| 0.0029 dB, 100% of pixels within 0.01 dB, no mirroring.
+- **Shared pixel grid.** Terrain correction uses the AOI's UTM zone, a fixed
+  pixel spacing and `alignToStandardGrid` with origin (0, 0), so every pass over
+  an AOI lands on the same grid. Flood and reference images can then be
+  differenced pixel for pixel without resampling again.
 - **Pairing rule.** A reference must match the flood pass's relative orbit, orbit
   direction and polarisation, fall in the event's dry-season `reference` window,
   and cover at least 50% of the AOI. The latest qualifying pass wins (least

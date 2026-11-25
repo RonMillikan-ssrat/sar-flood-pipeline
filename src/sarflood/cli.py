@@ -9,6 +9,8 @@ Examples:
     sarflood calibrate data/raw/sindh/S1A_..._E8B2.zip --pol vv --window 8000 10048 12000 14048
     sarflood compare data/sigma0/sindh/..._vv_nr_win8000-10048_12000-14048.tif \
         data/snap/sindh/..._tnr_cal.tif --snap-band Sigma0_VV
+    sarflood orbits --aoi sindh --event pakistan-2022 --flood-pass S1A_044775_0558C6
+    sarflood terrain-correct --aoi sindh --event pakistan-2022 --flood-pass S1A_044775_0558C6 --dry-run
 """
 
 from __future__ import annotations
@@ -235,6 +237,111 @@ def cmd_compare(args) -> int:
     return 0
 
 
+def _load_pair(aoi: str, event: str, flood_pass: str):
+    pairs_file = data_root() / "pairs" / aoi / f"{event}.json"
+    if not pairs_file.exists():
+        print(f"{pairs_file} not found; run 'sarflood pairs' first", file=sys.stderr)
+        return None
+    doc = json.loads(pairs_file.read_text())
+    match = [p for p in doc["pairs"] if p["flood"]["key"] == flood_pass]
+    if not match:
+        print(f"no flood pass {flood_pass!r} in {pairs_file}", file=sys.stderr)
+        return None
+    return match[0]
+
+
+def cmd_orbits(args) -> int:
+    from .auth import CDSEAuth
+    from .download import download_product
+    from .orbits import find_orbit, pass_window, snap_orbit_dir
+
+    pair = _load_pair(args.aoi, args.event, args.flood_pass)
+    if pair is None:
+        return 2
+    roles = ["flood", "reference"] if args.role == "both" else [args.role]
+    auth = None
+    for role in roles:
+        ps = pair[role]
+        if ps is None:
+            print(f"{args.flood_pass}: no {role} pass", file=sys.stderr)
+            return 2
+        platform = ps["key"].split("_")[0]
+        start, end = pass_window(ps["slices"])
+        orb = find_orbit(platform, start, end)
+        if orb is None:
+            print(f"{role} {ps['key']}: no AUX_POEORB covering {start:%Y-%m-%d %H:%M:%S}-"
+                  f"{end:%H:%M:%S}. Too recent? Precise orbits appear about 3 weeks after "
+                  f"acquisition", file=sys.stderr)
+            return 1
+        dest = snap_orbit_dir(platform, start)
+        print(f"{role:<9} {ps['key']}  {start:%Y-%m-%d %H:%M:%S}-{end:%H:%M:%S}\n"
+              f"  orbit  {orb.name}  (valid {orb.valid_start:%m-%d %H:%M} -> "
+              f"{orb.valid_end:%m-%d %H:%M})\n  dest   {dest}")
+        if args.dry_run:
+            continue
+        auth = auth or CDSEAuth()
+        path = download_product(orb.id, orb.name, dest, auth, expected_size=orb.size,
+                                out_name=orb.name)
+        print(f"  ok     {path}")
+    return 0
+
+
+def cmd_terrain_correct(args) -> int:
+    from .snap import build_tc_graph, gpt_path, run_gpt, utm_epsg
+
+    aois = load_aois(args.config)
+    aoi = aois.get(args.aoi)
+    if aoi is None:
+        print(f"unknown AOI {args.aoi!r}", file=sys.stderr)
+        return 2
+    pairs_file = data_root() / "pairs" / args.aoi / f"{args.event}.json"
+    if not pairs_file.exists():
+        print(f"{pairs_file} not found; run 'sarflood pairs' first", file=sys.stderr)
+        return 2
+    doc = json.loads(pairs_file.read_text())
+    match = [p for p in doc["pairs"] if p["flood"]["key"] == args.flood_pass]
+    if not match:
+        print(f"no flood pass {args.flood_pass!r} in {pairs_file}", file=sys.stderr)
+        return 2
+    pair = match[0]
+    roles = ["flood", "reference"] if args.role == "both" else [args.role]
+
+    x0, y0, x1, y1 = aoi.bbox
+    epsg = args.epsg or utm_epsg((x0 + x1) / 2, (y0 + y1) / 2)
+    raw = data_root() / "raw" / args.aoi
+    out_dir = data_root() / "tc" / args.aoi
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    rc = 0
+    for role in roles:
+        ps = pair[role]
+        if ps is None:
+            print(f"{args.flood_pass}: no {role} pass ({pair['reason']})", file=sys.stderr)
+            return 2
+        zips = [(raw / (n.removesuffix(".SAFE") + ".zip")).resolve() for n in ps["slices"]]
+        missing = [z for z in zips if not z.exists()]
+        if missing:
+            print(f"{role} {ps['key']}: missing {[z.name for z in missing]}; run 'sarflood download'",
+                  file=sys.stderr)
+            return 2
+        clip = "clip" if args.clip else "noclip"
+        stem = f"{ps['key']}_tc_{int(args.spacing)}m_{clip}_epsg{epsg}"
+        out = (out_dir / stem).resolve()  # absolute for gpt; the GeoTIFF writer adds .tif
+        graph = build_tc_graph(zips, out, aoi.to_wkt(), epsg, args.spacing, args.clip)
+        gfile = out_dir / f"{stem}.graph.xml"
+        gfile.write_text(graph)
+        print(f"{role:<9} {ps['key']}  {len(zips)} slice(s)  EPSG:{epsg}  {args.spacing:g} m  "
+              f"clip={args.clip}\n  graph  {gfile}\n  output {out}.tif")
+        if args.dry_run:
+            print(f"  run: {gpt_path()} {gfile}")
+            continue
+        rc = run_gpt(gfile)
+        if rc != 0:
+            print(f"gpt failed with exit code {rc}", file=sys.stderr)
+            return rc
+    return rc
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="sarflood")
     p.add_argument("--config", default=None, help="path to aois.yaml")
@@ -287,6 +394,27 @@ def main(argv: list[str] | None = None) -> int:
     co.add_argument("--snap-band", default="1",
                     help="band name (e.g. Sigma0_VV) or 1-based index (default 1)")
     co.set_defaults(func=cmd_compare)
+
+    tc = sub.add_parser("terrain-correct",
+                        help="SNAP: assemble, orbit, TNR, calibrate, terrain-correct, clip to AOI")
+    tc.add_argument("--aoi", required=True)
+    tc.add_argument("--event", required=True)
+    tc.add_argument("--flood-pass", required=True)
+    tc.add_argument("--role", choices=["flood", "reference", "both"], default="both")
+    tc.add_argument("--spacing", type=float, default=20.0, help="pixel spacing in m (default 20)")
+    tc.add_argument("--epsg", type=int, help="output CRS (default: UTM zone of the AOI centre)")
+    tc.add_argument("--clip", action="store_true",
+                    help="clip negatives in TNR (default off: TC resamples, see MPC-0392)")
+    tc.add_argument("--dry-run", action="store_true", help="write the graph(s) and print, no gpt run")
+    tc.set_defaults(func=cmd_terrain_correct)
+
+    ob = sub.add_parser("orbits", help="fetch precise orbit files from CDSE into SNAP's folder")
+    ob.add_argument("--aoi", required=True)
+    ob.add_argument("--event", required=True)
+    ob.add_argument("--flood-pass", required=True)
+    ob.add_argument("--role", choices=["flood", "reference", "both"], default="both")
+    ob.add_argument("--dry-run", action="store_true", help="find the files, don't download")
+    ob.set_defaults(func=cmd_orbits)
 
     args = p.parse_args(argv)
     if args.config is None:

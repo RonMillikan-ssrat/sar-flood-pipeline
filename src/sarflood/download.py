@@ -66,15 +66,18 @@ def _open_stream(url: str, auth: CDSEAuth, session: requests.Session,
 
 def download_product(product_id: str, name: str, dest_dir: Path, auth: CDSEAuth,
                      expected_size: int | None = None,
-                     session: requests.Session | None = None) -> Path:
+                     session: requests.Session | None = None,
+                     out_name: str | None = None) -> Path:
+    """out_name defaults to <name without .SAFE>.zip (Sentinel-1 products arrive zipped).
+    Pass it for products delivered as-is, e.g. orbit .EOF files."""
     sess = session or requests.Session()
     dest_dir.mkdir(parents=True, exist_ok=True)
-    out = dest_dir / (name.removesuffix(".SAFE") + ".zip")
+    out = dest_dir / (out_name or (name.removesuffix(".SAFE") + ".zip"))
     if out.exists() and (expected_size is None or out.stat().st_size == expected_size):
         log.info("skip (complete): %s", out.name)
         return out
 
-    part = out.with_suffix(".zip.part")
+    part = out.with_name(out.name + ".part")
     written = 0
     with _open_stream(DOWNLOAD_URL.format(id=product_id), auth, sess) as r, open(part, "wb") as f:
         for chunk in r.iter_content(CHUNK):
@@ -84,5 +87,5 @@ def download_product(product_id: str, name: str, dest_dir: Path, auth: CDSEAuth,
         raise RuntimeError(f"{name}: got {written} bytes, catalog says {expected_size}; "
                            f"partial file left at {part}")
     part.replace(out)
-    log.info("done: %s (%.2f GB)", out.name, written / 1e9)
+    log.info("done: %s (%.3f GB)", out.name, written / 1e9)
     return out
