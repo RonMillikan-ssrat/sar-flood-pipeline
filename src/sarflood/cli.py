@@ -424,7 +424,14 @@ def cmd_evaluate(args) -> int:
     import numpy as np
     import rasterio
 
-    from .labels import LABEL_BANDS, confusion_quicklook, rasterize_ems, score, threshold_sweep
+    from .labels import (
+        LABEL_BANDS,
+        class_histograms,
+        confusion_quicklook,
+        rasterize_ems,
+        score,
+        threshold_sweep,
+    )
 
     pair = _load_pair(args.aoi, args.event, args.flood_pass)
     if pair is None or pair["reference"] is None:
@@ -446,6 +453,9 @@ def cmd_evaluate(args) -> int:
         band = lambda n: src.read(names.index(n) + 1)
         dvv, fvv = band("dvv_db"), band("flood_vv_db")
         valid, cand = band("valid") > 0, band("candidate") > 0
+        hist_bands = {n: band(n) for n in ("flood_vv_db", "ref_vv_db", "dvv_db", "flood_vh_db")} \
+            if args.hist else {}
+        valid_vh = band("valid_vh") > 0 if "valid_vh" in names else valid
         profile, tags = src.profile, src.tags()
         transform, crs, shape = src.transform, src.crs, src.shape
     px_area = abs(transform.a * transform.e)
@@ -454,7 +464,8 @@ def cmd_evaluate(args) -> int:
     out_dir = data_root() / "eval" / args.aoi
     out_dir.mkdir(parents=True, exist_ok=True)
     lab_tif = out_dir / f"{stem}_{z.stem}_labels.tif"
-    profile.update(count=len(LABEL_BANDS), dtype="float32")
+    profile.update(count=len(LABEL_BANDS), dtype="float32", tiled=True,
+                   blockxsize=256, blockysize=256, compress="deflate")
     with rasterio.open(lab_tif, "w", **profile) as dst:
         for i, n in enumerate(LABEL_BANDS, 1):
             dst.write(labels[n].astype(np.float32), i)
@@ -479,17 +490,33 @@ def cmd_evaluate(args) -> int:
         rows = threshold_sweep(dvv, fvv, labels, valid, px_area)
         results["sweep"] = rows
         best = max(rows, key=lambda r: r["iou"] if r["iou"] == r["iou"] else -1)
-        print("sweep (IoU; tuned on these labels, so optimistic):")
+        print("sweep (IoU; tuned on these labels, so optimistic; 'none' = no change condition):")
         waters = sorted({r["water_db"] for r in rows}, reverse=True)
         print("  dVV\\VV  " + "".join(f"{w:>8.0f}" for w in waters))
-        for c in sorted({r["change_db"] for r in rows}, reverse=True):
-            row = {r["water_db"]: r["iou"] for r in rows if r["change_db"] == c}
-            print(f"  {c:>6.0f}  " + "".join(f"{row[w]:>8.3f}" for w in waters))
-        print(f"  best: dVV <= {best['change_db']}, VV <= {best['water_db']}: IoU {best['iou']:.3f}"
+        changes = [None] + sorted({r["change_db"] for r in rows} - {None}, reverse=True)
+        for ch in changes:
+            row = {r["water_db"]: r["iou"] for r in rows if r["change_db"] == ch}
+            lab = "none" if ch is None else f"{ch:.0f}"
+            print(f"  {lab:>6}  " + "".join(f"{row[w]:>8.3f}" for w in waters))
+        bc = "none" if best["change_db"] is None else best["change_db"]
+        print(f"  best: dVV <= {bc}, VV <= {best['water_db']}: IoU {best['iou']:.3f}"
               f"  (P {best['precision']:.3f}, R {best['recall']:.3f})")
-        cs = sorted({r["change_db"] for r in rows})
-        if best["change_db"] in (cs[0], cs[-1]) or best["water_db"] in (waters[0], waters[-1]):
+        nums = [ch for ch in changes if ch is not None]
+        edge_c = best["change_db"] is not None and best["change_db"] in (nums[0], nums[-1])
+        if edge_c or best["water_db"] in (waters[0], waters[-1]):
             print("  note: best is on the edge of the grid; the optimum may lie beyond it")
+    if args.hist:
+        hpng = out_dir / f"{stem}_{z.stem}_hist.png"
+        summ = class_histograms(hist_bands, labels, valid, valid_vh, hpng,
+                                title=f"{args.aoi} {stem}: EMS flood vs dry (scored region)")
+        results["hist"] = summ
+        print("distributions in the scored region (p10 / p50 / p90), best single cut 'x <= t':")
+        for n, s in summ.items():
+            fl, dr = s["flood_p10_p50_p90"], s["dry_p10_p50_p90"]
+            print(f"  {n:<12} flood {fl[0]:7.2f} {fl[1]:7.2f} {fl[2]:7.2f}   "
+                  f"dry {dr[0]:7.2f} {dr[1]:7.2f} {dr[2]:7.2f}   "
+                  f"cut {s['best_cut']:7.2f} -> IoU {s['best_cut_iou']:.3f}")
+        print(f"-> {hpng}")
     png = confusion_quicklook(cand, labels, valid, out_dir / f"{stem}_{z.stem}_confusion.png",
                               title=f"{args.aoi}: threshold preview vs {z.stem}")
     out = write_json(out_dir / f"{stem}_{z.stem}_score.json",
@@ -601,6 +628,8 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("--sweep", action="store_true", help="IoU over a grid of thresholds")
     ev.add_argument("--smooth", type=int, default=1,
                     help="evaluate the change map made with this --smooth (default 1)")
+    ev.add_argument("--hist", action="store_true",
+                    help="class-conditional distributions (EMS flood vs dry) + best single cuts")
     ev.set_defaults(func=cmd_evaluate)
 
     args = p.parse_args(argv)

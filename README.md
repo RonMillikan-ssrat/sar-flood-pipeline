@@ -22,7 +22,7 @@ terrain, a drift check flags it, and the model registry refuses to promote it.
 | Server-side processed backscatter for scale | Sentinel Hub / openEO | todo |
 | Change detection on the shared grid: optional N×N speckle averaging (linear, unclipped), per-polarization validity, VV/VH dB and change, quick-look, threshold preview | `change.py`, `sarflood change` | **done** |
 | EMS activation check: AOI extents vs ours, product imagery (circularity check) | `ems.py`, `sarflood ems-info` | **built** |
-| Labels: EMS delineation (flood fraction via sub-pixel rasterization, AOI, not-analysed, permanent water) on the change grid; IoU/F1/precision/recall; outcome map | `labels.py`, `sarflood evaluate` | **built** |
+| Labels: EMS delineation (flood fraction via sub-pixel rasterization, AOI, not-analysed, permanent water) on the change grid; IoU/F1/precision/recall; outcome map; threshold sweep incl. no-change rule; class-conditional distributions + best single cut per variable | `labels.py`, `sarflood evaluate` | **done** |
 | Baseline: Otsu threshold on VV backscatter | | todo |
 | Train U-Net | GEAP Pipelines (Kubeflow) | todo |
 | Track, register, gate, roll back | MLflow | todo |

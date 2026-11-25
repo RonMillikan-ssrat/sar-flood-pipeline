@@ -134,10 +134,38 @@ def test_cli_evaluate_end_to_end(tmp_path, monkeypatch, capsys):
     pf.write_text(json.dumps({"pairs": [{"flood": {"key": "F_KEY"}, "reference": {"key": "R_KEY"},
                                          "reason": "ok"}]}))
     rc = cli.main(["evaluate", "--aoi", "larkana", "--event", "pakistan-2022",
-                   "--flood-pass", "F_KEY", "--ems-zip", str(z), "--sweep"])
+                   "--flood-pass", "F_KEY", "--ems-zip", str(z), "--sweep", "--hist"])
     assert rc == 0
     out = capsys.readouterr().out
     assert "IoU 1.000" in out
     rep = json.loads(next((tmp_path / "eval" / "larkana").glob("*_score.json")).read_text())
-    assert rep["all"]["iou"] == 1.0 and len(rep["sweep"]) == 42
+    assert rep["all"]["iou"] == 1.0 and len(rep["sweep"]) == 63
+    assert any(r["change_db"] is None for r in rep["sweep"])
+    assert rep["hist"]["flood_vv_db"]["best_cut_iou"] == 1.0
+    assert next((tmp_path / "eval" / "larkana").glob("*_hist.png")).stat().st_size > 1000
     assert next((tmp_path / "eval" / "larkana").glob("*_confusion.png")).stat().st_size > 1000
+
+
+def test_best_single_threshold():
+    from sarflood.labels import best_single_threshold
+
+    x = np.array([-25, -22, -20, -8, -6, -5, np.nan], dtype=float)
+    truth = np.array([1, 1, 1, 0, 0, 0, 1], bool)
+    b = best_single_threshold(x, truth)
+    assert b["iou"] == 1.0 and -20 <= b["t"] < -8
+    noisy = np.array([1, 1, 0, 1, 0, 0, 0], bool)       # one dry pixel is darker than a flood one
+    assert best_single_threshold(x, noisy)["iou"] < 1.0
+
+
+def test_sweep_no_change_row():
+    from sarflood.labels import threshold_sweep
+
+    frac = np.array([[1.0, 1.0, 0.0]], np.float32)
+    lab = {"flood_frac": frac, "flood": frac, "aoi": np.ones_like(frac),
+           "not_analysed": np.zeros_like(frac), "perm_water": np.zeros_like(frac)}
+    fvv = np.array([[-20.0, -20.0, -5.0]])
+    dvv = np.array([[-8.0, 2.0, 0.0]])       # second flood pixel got *brighter*
+    rows = threshold_sweep(dvv, fvv, lab, np.ones((1, 3), bool), 400.0,
+                           change_grid=(None, -3.0), water_grid=(-15.0,))
+    by = {r["change_db"]: r["iou"] for r in rows}
+    assert by[None] == 1.0 and by[-3.0] == 0.5

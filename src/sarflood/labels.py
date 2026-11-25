@@ -130,18 +130,88 @@ def score(pred: np.ndarray, labels: dict[str, np.ndarray], valid: np.ndarray,
 
 def threshold_sweep(dvv: np.ndarray, fvv: np.ndarray, labels: dict[str, np.ndarray],
                     valid: np.ndarray, pixel_area_m2: float,
-                    change_grid=(1.0, 0.0, -1.0, -2.0, -3.0, -4.0, -6.0),
-                    water_grid=(-10.0, -12.0, -14.0, -16.0, -18.0, -20.0)) -> list[dict]:
-    """IoU for each (change_db, water_db) pair. Tuning on the evaluation labels is
+                    change_grid=(None, 3.0, 1.0, 0.0, -1.0, -2.0, -3.0, -4.0, -6.0),
+                    water_grid=(-8.0, -10.0, -12.0, -14.0, -16.0, -18.0, -20.0)) -> list[dict]:
+    """IoU for each (change_db, water_db) pair. change_db None = no change condition
+    (a single-image threshold on flood VV only). Tuning on the evaluation labels is
     optimistic; use it to understand the data, not as a reported accuracy."""
     rows = []
     for c in change_grid:
         for w in water_grid:
-            pred = valid & (dvv <= c) & (fvv <= w)
+            pred = valid & (fvv <= w)
+            if c is not None:
+                pred &= dvv <= c
             s = score(pred, labels, valid, pixel_area_m2)
             rows.append({"change_db": c, "water_db": w, "iou": s.iou, "f1": s.f1,
                          "precision": s.precision, "recall": s.recall})
     return rows
+
+
+def best_single_threshold(x: np.ndarray, truth: np.ndarray, n: int = 200) -> dict:
+    """Best IoU of the rule 'x <= t' (darker = flood) over n candidate thresholds
+    taken from the percentiles of x. Shows how well one variable alone separates."""
+    ok = np.isfinite(x)
+    x, truth = x[ok], truth[ok]
+    if x.size == 0 or not truth.any():
+        return {"t": float("nan"), "iou": float("nan")}
+    ts = np.unique(np.percentile(x, np.linspace(0.5, 99.5, n)))
+    n_true = truth.sum()
+    best = (float("nan"), -1.0)
+    for t in ts:
+        p = x <= t
+        tp = int((p & truth).sum())
+        iou = tp / (n_true + p.sum() - tp)
+        if iou > best[1]:
+            best = (float(t), float(iou))
+    return {"t": best[0], "iou": best[1]}
+
+
+HIST_VARS = [  # (band name, label, needs VH validity)
+    ("flood_vv_db", "flood-pass VV (dB)", False),
+    ("ref_vv_db", "reference VV (dB)", False),
+    ("dvv_db", "VV change, flood - ref (dB)", False),
+    ("flood_vh_db", "flood-pass VH (dB)", True),
+]
+
+
+def class_histograms(bands: dict[str, np.ndarray], labels: dict[str, np.ndarray],
+                     valid: np.ndarray, valid_vh: np.ndarray, png: Path,
+                     title: str = "") -> dict:
+    """Per variable: distributions for EMS flood vs EMS dry pixels in the scoring
+    region, class percentiles, and the best single-threshold IoU."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    base = (labels["aoi"] > 0) & (labels["not_analysed"] == 0) & (labels["perm_water"] == 0)
+    truth = labels["flood"] > 0
+    summary = {}
+    fig, axes = plt.subplots(1, len(HIST_VARS), figsize=(5 * len(HIST_VARS), 4),
+                             constrained_layout=True)
+    for ax, (name, label, vh) in zip(axes, HIST_VARS):
+        region = base & (valid_vh if vh else valid)
+        v = bands[name]
+        f, d = v[region & truth], v[region & ~truth]
+        f, d = f[np.isfinite(f)], d[np.isfinite(d)]
+        lo, hi = np.percentile(np.concatenate([f, d]), [0.5, 99.5]) if f.size + d.size else (0, 1)
+        if hi <= lo:  # degenerate (constant) data: give the histogram a usable range
+            lo, hi = lo - 0.5, hi + 0.5
+        bins = np.linspace(lo, hi, 120)
+        ax.hist(d, bins=bins, density=True, alpha=0.55, color="#b8860b", label=f"EMS dry (n={d.size:,})")
+        ax.hist(f, bins=bins, density=True, alpha=0.55, color="#2166ac", label=f"EMS flood (n={f.size:,})")
+        best = best_single_threshold(np.where(region, v, np.nan), truth & region)
+        ax.axvline(best["t"], color="k", lw=1, ls="--")
+        ax.set_title(f"{label}\nbest single cut {best['t']:.1f}: IoU {best['iou']:.3f}", fontsize=9)
+        ax.legend(fontsize=7)
+        pct = lambda a: [float(q) for q in np.percentile(a, [10, 50, 90])] if a.size else []
+        summary[name] = {"flood_p10_p50_p90": pct(f), "dry_p10_p50_p90": pct(d),
+                         "best_cut": best["t"], "best_cut_iou": best["iou"]}
+    fig.suptitle(title, fontsize=9)
+    png.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(png, dpi=100)
+    plt.close(fig)
+    return summary
 
 
 def confusion_quicklook(pred: np.ndarray, labels: dict[str, np.ndarray], valid: np.ndarray,
