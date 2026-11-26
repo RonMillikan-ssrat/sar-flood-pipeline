@@ -84,6 +84,10 @@ def test_loao_model_beats_rule_a_on_flooded_vegetation(tmp_path):
     for name, fold in res["folds"].items():
         a = fold["rule_A"]
         hgb = fold["models"]["hgb"]["metrics"]
+        assert {"hgb", "hgb_bal", "logreg", "logreg_bal"} <= set(fold["models"])
+        assert fold["models"]["hgb_bal"]["train_flood_share"] == pytest.approx(0.5, abs=0.01)
+        assert fold["models"]["hgb"]["auc"] > a["auc"]        # VH - VV ranks the vegetation
+        assert 0 <= a["best_iou"] <= 1 and np.isfinite(a["best_cut"])
         # Rule A misses the bright flooded vegetation; the model catches it from VH - VV.
         assert a["recall"] < 0.7, name
         assert hgb["iou"] > 0.95 and hgb["iou"] > a["iou"] + 0.2, name
@@ -120,3 +124,34 @@ def test_cli_train_pixels(tmp_path, monkeypatch, capsys):
     assert set(rep["folds"]) == {"larkana", "shikarpur"}
     assert "_prob" not in json.dumps(rep)
     assert len(list((tmp_path / "ml" / "pixels").glob("*_hgb_confusion.png"))) == 2
+    assert len(list((tmp_path / "ml" / "pixels").glob("*_hgb_bal_confusion.png"))) == 2
+    assert "bestIoU" in out
+
+
+def test_sample_pure_balanced():
+    from sarflood.features import AoiData
+    from sarflood.pixels import sample_pure
+
+    n = 1000
+    y = np.zeros(n, bool)
+    y[:100] = True                                   # 10% flood
+    frac = y.astype(np.float32)
+    frac[100:150] = 0.5                              # mixed: never sampled
+    d = AoiData("x", np.arange(n, dtype=np.float32)[:, None], y, frac, np.arange(n), (1, n),
+                {}, np.ones(n, bool), 400.0)
+    rng = np.random.default_rng(0)
+    X, yy = sample_pure(d, 120, rng, balanced=True)
+    assert yy.sum() == 60 and (~yy).sum() == 60
+    assert not np.isin(X[:, 0], np.arange(100, 150)).any()
+    X, yy = sample_pure(d, 400, rng, balanced=True)  # only 100 flood exist -> 100 + 100
+    assert yy.sum() == 100 and (~yy).sum() == 100
+
+
+def test_threshold_free_perfect_and_reversed():
+    from sarflood.pixels import threshold_free
+
+    truth = np.array([1, 1, 0, 0], bool)
+    good = threshold_free(np.array([0.9, 0.8, 0.2, 0.1]), truth)
+    assert good["auc"] == 1.0 and good["best_iou"] == 1.0
+    bad = threshold_free(np.array([0.1, 0.2, 0.8, 0.9]), truth)
+    assert bad["auc"] == 0.0

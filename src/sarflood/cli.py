@@ -602,28 +602,37 @@ def cmd_train_pixels(args) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     tag = f"{args.flood_pass}_s{args.smooth}"
     print(f"\nleave-one-AOI-out (train: pure-pixel sample, {args.samples:,}/AOI; "
-          f"test: all scored px of the held-out AOI; cut 0.5)")
-    print(f"  {'held out':<10} {'model':<8} {'IoU':>6} {'F1':>6} {'P':>6} {'R':>6}")
+          f"test: all scored px of the held-out AOI; cut 0.5; '_bal' = class-balanced training)")
+    print("best-IoU uses the test labels to pick the cut: a diagnostic ceiling, not a result")
+    print(f"  {'held out':<10} {'model':<11} {'trainFS':>7} {'IoU@.5':>7} {'P':>6} {'R':>6} "
+          f"{'AUC':>6} {'AP':>6} {'bestIoU':>8} {'cut':>7}")
     for test in data:
         fold = res["folds"][test.name]
-        rows = [("rule A", fold["rule_A"])] + [(m, e["metrics"]) for m, e in fold["models"].items()]
-        for m, s in rows:
-            print(f"  {test.name:<10} {m:<8} {s['iou']:6.3f} {s['f1']:6.3f} "
-                  f"{s['precision']:6.3f} {s['recall']:6.3f}")
+        a = fold["rule_A"]
+        print(f"  {test.name:<10} {'rule A':<11} {'':>7} {a['iou']:7.3f} {a['precision']:6.3f} "
+              f"{a['recall']:6.3f} {a['auc']:6.3f} {a['ap']:6.3f} {a['best_iou']:8.3f} "
+              f"{a['best_cut']:6.1f}dB")
+        for m, e in fold["models"].items():
+            s = e["metrics"]
+            print(f"  {'':<10} {m:<11} {e['train_flood_share']:7.2f} {s['iou']:7.3f} "
+                  f"{s['precision']:6.3f} {s['recall']:6.3f} {e['auc']:6.3f} {e['ap']:6.3f} "
+                  f"{e['best_iou']:8.3f} {e['best_cut']:7.2f}")
+        print(f"  {'':<10} (test flood share {fold['test_flood_share']:.2f})")
         for m, e in fold["models"].items():
             prob = e.pop("_prob")
-            if m == "hgb":
+            if m in ("hgb", "hgb_bal"):
                 grid = np.zeros(test.shape[0] * test.shape[1], bool)
                 grid[test.idx] = prob >= 0.5
                 confusion_quicklook(grid.reshape(test.shape), test.labels, test.valid,
-                                    out_dir / f"{tag}_{test.name}_hgb_confusion.png",
-                                    title=f"{test.name} held out: gradient boosting "
+                                    out_dir / f"{tag}_{test.name}_{m}_confusion.png",
+                                    title=f"{test.name} held out: {m} "
                                           f"(trained on {', '.join(fold['train_aois'])})")
-        imp = fold["models"].get("hgb", {}).get("perm_importance_iou")
-        if imp:
-            top = sorted(imp.items(), key=lambda kv: -kv[1])[:5]
-            print(f"  {'':<10} hgb top features (IoU drop when shuffled): "
-                  + ", ".join(f"{k} {v:+.3f}" for k, v in top))
+        for m in ("hgb", "hgb_bal"):
+            imp = fold["models"].get(m, {}).get("perm_importance_iou")
+            if imp:
+                top = sorted(imp.items(), key=lambda kv: -kv[1])[:5]
+                print(f"  {'':<10} {m} top features (IoU drop when shuffled): "
+                      + ", ".join(f"{k} {v:+.3f}" for k, v in top))
     out = write_json(out_dir / f"{tag}_loao.json", res)
     print(f"-> {out}")
     return 0
