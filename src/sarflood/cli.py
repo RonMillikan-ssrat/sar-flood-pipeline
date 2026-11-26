@@ -436,6 +436,7 @@ def cmd_evaluate(args) -> int:
 
     from .labels import (
         LABEL_BANDS,
+        LABELS_VERSION,
         class_histograms,
         confusion_quicklook,
         rasterize_ems,
@@ -481,13 +482,16 @@ def cmd_evaluate(args) -> int:
         for i, n in enumerate(LABEL_BANDS, 1):
             dst.write(labels[n].astype(np.float32), i)
             dst.set_band_description(i, n)
-        dst.update_tags(ems_zip=z.name, change=change_tif.name)
+        dst.update_tags(ems_zip=z.name, change=change_tif.name, labels_version=LABELS_VERSION)
 
     aoi_px = int(labels["aoi"].sum())
     print(f"labels -> {lab_tif}")
     print(f"EMS AOI {aoi_px:,} px ({aoi_px * px_area / 1e6:.1f} km2): flooded "
           f"{100 * labels['flood'][labels['aoi'] > 0].mean():.1f}%, not analysed "
           f"{int(labels['not_analysed'].sum()):,} px, permanent water {int(labels['perm_water'].sum()):,} px")
+    base = score(np.ones(shape, bool), labels, valid, px_area)
+    print(f"baseline: flood share of the scored region {base.flood_share:.3f} = IoU of an "
+          f"all-flood map; skill is IoU above this (labels v{LABELS_VERSION})")
     cd, wd = tags.get("change_db"), tags.get("water_db")
     results = {}
     for name, lo, hi in [("all", None, None), ("pure_only", 0.2, 0.8)]:
@@ -530,8 +534,9 @@ def cmd_evaluate(args) -> int:
                 entry[name] = s.to_dict()
             results["rules"][spec] = entry
             a, p = entry["all"], entry["pure_only"]
-            print(f"  {spec:<18} [{rule.describe()}]  IoU {a['iou']:.3f}  F1 {a['f1']:.3f}  "
-                  f"P {a['precision']:.3f}  R {a['recall']:.3f}  | pure-only IoU {p['iou']:.3f}")
+            print(f"  {spec:<18} [{rule.describe()}]  IoU {a['iou']:.3f} ({a['iou_gain']:+.3f} vs "
+                  f"all-flood)  F1 {a['f1']:.3f}  P {a['precision']:.3f}  R {a['recall']:.3f}  "
+                  f"| pure-only IoU {p['iou']:.3f}")
             tag = "".join(ch if ch.isalnum() else "_" for ch in spec)
             confusion_quicklook(pred, labels, valid, out_dir / f"{stem}_{z.stem}_rule_{tag}.png",
                                 title=f"{args.aoi}: rule {spec} [{rule.describe()}] vs {z.stem}")
@@ -550,7 +555,8 @@ def cmd_evaluate(args) -> int:
     png = confusion_quicklook(cand, labels, valid, out_dir / f"{stem}_{z.stem}_confusion.png",
                               title=f"{args.aoi}: threshold preview vs {z.stem}")
     out = write_json(out_dir / f"{stem}_{z.stem}_score.json",
-                     {"change": change_tif.name, "ems_zip": z.name, **results})
+                     {"change": change_tif.name, "ems_zip": z.name,
+                      "labels_version": LABELS_VERSION, "baseline": base.to_dict(), **results})
     print(f"-> {out}\n-> {png}")
     return 0
 
@@ -625,6 +631,10 @@ def cmd_train_pixels(args) -> int:
 
     res = leave_one_aoi_out(data, n_train=args.samples, seed=args.seed,
                             importance=not args.no_importance)
+    res["labels_versions"] = {d.name: d.labels_version for d in data}
+    if len(set(res["labels_versions"].values())) > 1:
+        print(f"WARNING: AOIs use different label versions {res['labels_versions']}; "
+              "re-run 'sarflood evaluate' on the older ones", file=sys.stderr)
     out_dir = data_root() / "ml" / "pixels"
     out_dir.mkdir(parents=True, exist_ok=True)
     tag = f"{args.flood_pass}_s{args.smooth}"
@@ -790,11 +800,74 @@ def cmd_fit_final(args) -> int:
             print(f"{a}: missing change map or labels for --smooth {args.smooth}", file=sys.stderr)
             return 2
         data.append(load_aoi(a, ctif, labs[0]))
+    from .tracking import combined_labels_version, labels_version_of_report
+
+    rep_lv = labels_version_of_report(report)
+    now_lv = combined_labels_version(d.labels_version for d in data)
+    if rep_lv != now_lv:
+        print(f"{report.name} was computed on labels version {rep_lv}, but the labels on disk "
+              f"are {now_lv}; re-run train-pixels first so the gate matches the model",
+              file=sys.stderr)
+        return 2
     v, run = fit_final(data, args.method, args.samples, args.seed, gate, report.name,
                        {"flood_pass": args.flood_pass, "event": args.event,
                         "smooth": str(args.smooth)})
     print(f"registered sarflood-pixel-flood v{v} ({args.method}, run {run}); "
           f"gate mean.iou_n300 = {gate:.4f} from {report.name}")
+    return 0
+
+
+def cmd_score_holdout(args) -> int:
+    from .features import FEATURES, load_aoi
+    from .tracking import holdout_metrics, load_version, log_holdout
+
+    pair = _load_pair(args.aoi, args.event, args.flood_pass)
+    if pair is None or pair["reference"] is None:
+        return 2
+    stem = _change_stem(pair, args.spacing, args.smooth)
+    ctif = data_root() / "change" / args.aoi / f"{stem}_change.tif"
+    labs = sorted((data_root() / "eval" / args.aoi).glob(f"{stem}_EMSR*_labels.tif"))
+    if not ctif.exists() or len(labs) != 1:
+        print(f"{args.aoi}: need {ctif.name} and exactly one labels file ({len(labs)} found); "
+              f"run 'change' and 'evaluate' with --smooth {args.smooth}", file=sys.stderr)
+        return 2
+    model, v, tags = load_version(args.version, args.alias)
+    if tags.get("features") and tags["features"] != ",".join(FEATURES):
+        print(f"v{v} was trained on features {tags['features']}, not the current set",
+              file=sys.stderr)
+        return 2
+    trained_on = set(tags.get("train_aois", "").split(",")) - {""}
+    if args.aoi in trained_on:
+        print(f"WARNING: v{v} was trained on {args.aoi}; this is not a holdout score",
+              file=sys.stderr)
+    d = load_aoi(args.aoi, ctif, labs[0])
+    prob = model.predict_proba(d.X)[:, 1]
+    res = holdout_metrics(prob, d.y, d.X[:, FEATURES.index("vv")], seed=args.seed)
+    res.update(aoi=args.aoi, flood_pass=args.flood_pass, model_version=v,
+               model_method=tags.get("method"), labels=labs[0].name,
+               labels_version=d.labels_version,
+               model_labels_version=tags.get("labels_version", "1"))
+
+    print(f"{args.aoi} ({args.flood_pass}), model v{v} {tags.get('method', '?')}; "
+          f"{res['n']:,} scored px, labels v{d.labels_version}")
+    print(f"flood share {res['flood_share']:.3f} = IoU of an all-flood map")
+    print(f"  {'method':<14} {'IoU':>6} {'gain':>7} {'P':>6} {'R':>6} {'AUC':>6} {'AP':>6} "
+          f"{'IoU@n300':>9} {'ceiling':>8}")
+    for name, key, cut in ((f"v{v} @0.5", "model", ""), ("rule A", "rule_A", "")):
+        r = res[key]
+        print(f"  {name:<14} {r['iou']:6.3f} {r['iou'] - res['flood_share']:+7.3f} "
+              f"{r['precision']:6.3f} {r['recall']:6.3f} {r['auc']:6.3f} {r['ap']:6.3f} "
+              f"{r['iou_n300']:9.3f} {r['best_iou']:8.3f}{cut}")
+    print("AUC/AP don't depend on a cut or on the flood share; IoU@n300 picks the cut from 300 "
+          "random local labels; ceiling picks it from all labels (diagnostic only)")
+    out_dir = data_root() / "ml" / "holdout"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = write_json(out_dir / f"{args.aoi}_{args.flood_pass}_s{args.smooth}_v{v}.json", res)
+    print(f"-> {out}")
+    if not args.no_mlflow:
+        run = log_holdout(args.aoi, v, tags, res, {"flood_pass": args.flood_pass,
+                                                   "event": args.event, "source": args.source})
+        print(f"logged to MLflow experiment sarflood-holdout, run {run}")
     return 0
 
 
@@ -807,7 +880,7 @@ def cmd_registry(args) -> int:
             print("no registered versions")
         for r in rows:
             print(f"  v{r['version']:<3} {r['method'] or '?':<11} gate {r['gate_value'] or '-':<9} "
-                  f"{r['created']}  {' '.join(r['aliases'])}")
+                  f"labels v{r['labels_version']:<8} {r['created']}  {' '.join(r['aliases'])}")
     elif args.action == "promote":
         version = args.version
         if args.latest:
@@ -986,6 +1059,19 @@ def main(argv: list[str] | None = None) -> int:
     ff.add_argument("--samples", type=int, default=200_000)
     ff.add_argument("--seed", type=int, default=0)
     ff.set_defaults(func=cmd_fit_final)
+    sh = sub.add_parser("score-holdout",
+                        help="score a registered model on an AOI it was not trained on")
+    sh.add_argument("--aoi", required=True)
+    sh.add_argument("--event", required=True)
+    sh.add_argument("--flood-pass", required=True)
+    sh.add_argument("--smooth", type=int, default=3)
+    sh.add_argument("--spacing", type=float, default=20.0)
+    sh.add_argument("--version", type=int, help="registered version (default: the --alias)")
+    sh.add_argument("--alias", default="champion")
+    sh.add_argument("--seed", type=int, default=0)
+    sh.add_argument("--source", default="cli", help="MLflow tag, e.g. airflow")
+    sh.add_argument("--no-mlflow", action="store_true")
+    sh.set_defaults(func=cmd_score_holdout)
 
     rg = sub.add_parser("registry", help="model registry: show, promote (gated), rollback")
     rg.add_argument("action", choices=["show", "promote", "rollback"])

@@ -16,6 +16,12 @@ $DATA_ROOT/mlflow/. Set MLFLOW_TRACKING_URI to use a server instead.
 3. promote() / rollback(): alias 'champion' moves to a candidate only if the
    candidate's gate metric beats the champion's by at least min_delta (or force).
    The displaced champion gets alias 'previous'; rollback swaps them back.
+   Versions whose gate values were computed on different label definitions
+   (tag labels_version; untagged = "1") are not compared: promote refuses, and a
+   person decides with --force after looking at both.
+
+4. score_holdout(): apply a registered version to an AOI it never saw and log
+   AUC/AP/IoU (with the all-flood baseline) to the 'sarflood-holdout' experiment.
 """
 
 from __future__ import annotations
@@ -29,6 +35,19 @@ from pathlib import Path
 EXPERIMENT = "sarflood-loao"
 REGISTERED_MODEL = "sarflood-pixel-flood"
 GATE_METRIC = "mean.iou_n300"   # mean held-out IoU, cut chosen from 300 local labels
+HOLDOUT_EXPERIMENT = "sarflood-holdout"
+
+
+def combined_labels_version(versions) -> str:
+    """One version string for a set of AOIs: the shared version, or 'mixed:a,b'."""
+    vs = sorted(set(versions))
+    return vs[0] if len(vs) == 1 else "mixed:" + ",".join(vs)
+
+
+def labels_version_of_report(report: Path) -> str:
+    rep = json.loads(report.read_text())
+    lv = rep.get("labels_versions")
+    return combined_labels_version(lv.values()) if lv else "1"
 
 
 def mlflow_dir() -> Path:
@@ -191,7 +210,9 @@ def fit_final(data: list, method: str, n_train: int, seed: int, gate_value: floa
                                         skops_trusted_types=trusted)
     mv = mlflow.register_model(info.model_uri, REGISTERED_MODEL, tags={
         "method": method, "gate_metric": GATE_METRIC, "gate_value": f"{gate_value:.6f}",
-        "gate_source": gate_source, "features": ",".join(FEATURES), **tags})
+        "gate_source": gate_source, "features": ",".join(FEATURES),
+        "train_aois": ",".join(d.name for d in data),
+        "labels_version": combined_labels_version(d.labels_version for d in data), **tags})
     return int(mv.version), run.info.run_id
 
 
@@ -220,6 +241,7 @@ def registry_table() -> list[dict]:
         v = int(mv.version)
         rows.append({"version": v, "method": mv.tags.get("method"),
                      "gate_value": mv.tags.get("gate_value"),
+                     "labels_version": mv.tags.get("labels_version", "1"),
                      "aliases": [a for a, x in (("champion", champ), ("previous", prev)) if x == v],
                      "created": datetime.fromtimestamp(mv.creation_timestamp / 1000, UTC)
                      .strftime("%Y-%m-%d %H:%M")})
@@ -236,6 +258,12 @@ def promote(version: int, min_delta: float = 0.0, force: bool = False) -> str:
         champ = client.get_model_version(REGISTERED_MODEL, str(champ_v))
         if cand.tags.get("gate_metric") != champ.tags.get("gate_metric"):
             raise ValueError("gate metrics differ between candidate and champion; use --force")
+        lc, lch = cand.tags.get("labels_version", "1"), champ.tags.get("labels_version", "1")
+        if lc != lch:
+            raise ValueError(f"labels_version differs (candidate v{version}: {lc}, champion "
+                             f"v{champ_v}: {lch}): the gate values were computed on different "
+                             "label definitions and are not comparable. Review both, then "
+                             "promote with --force if the candidate should replace the champion")
         c, ch = float(cand.tags["gate_value"]), float(champ.tags["gate_value"])
         if c < ch + min_delta:
             return (f"REJECTED: v{version} {GATE_METRIC}={c:.4f} does not beat champion "
@@ -259,3 +287,50 @@ def rollback() -> str:
         client.set_model_version_tag(REGISTERED_MODEL, str(champ_v), "rolled_back_at",
                                      datetime.now(UTC).isoformat(timespec="seconds"))
     return f"ROLLED BACK: v{prev_v} is champion again" + (f" (v{champ_v} -> previous)" if champ_v else "")
+
+
+# ---------------------------------------------------------------- holdout scoring
+
+def load_version(version: int | None = None, alias: str = "champion"):
+    """(model, version, tags) for a registered version, or the one holding `alias`."""
+    import mlflow.sklearn
+
+    client = _client()
+    v = version if version is not None else _alias_version(client, alias)
+    if v is None:
+        raise ValueError(f"no version holds alias {alias!r}")
+    mv = client.get_model_version(REGISTERED_MODEL, str(v))
+    model = mlflow.sklearn.load_model(f"models:/{REGISTERED_MODEL}/{v}")
+    return model, int(v), dict(mv.tags)
+
+
+def holdout_metrics(prob, y, vv, seed: int = 0) -> dict:
+    """Scores of a model probability map and of rule A on one AOI's scored pixels."""
+    import numpy as np
+
+    from .pixels import RULE_A_DB, fewshot_iou, metrics, threshold_free
+
+    rng = np.random.default_rng(seed)
+    share = float(y.mean())
+    model = {**metrics(prob >= 0.5, y), **threshold_free(prob, y),
+             "iou_n300": fewshot_iou(-prob, y, rng, ns=(300,))["300"]["mean"]}
+    rule = {**metrics(vv <= RULE_A_DB, y), **threshold_free(-vv, y),
+            "iou_n300": fewshot_iou(vv, y, rng, ns=(300,))["300"]["mean"]}
+    rule["best_cut"] = -rule["best_cut"]
+    return {"flood_share": share, "iou_all_flood": share, "n": int(y.size),
+            "model": model, "rule_A": rule}
+
+
+def log_holdout(aoi: str, version: int, tags: dict, result: dict, run_tags: dict) -> str:
+    mlflow = setup(HOLDOUT_EXPERIMENT)
+    with mlflow.start_run(run_name=f"v{version}:{aoi}") as run:
+        mlflow.set_tags({"aoi": aoi, "model_version": str(version),
+                         "model_method": tags.get("method", "?"),
+                         "model_labels_version": tags.get("labels_version", "1"), **run_tags})
+        mlflow.log_metrics({"flood_share": result["flood_share"],
+                            "iou_all_flood": result["iou_all_flood"]})
+        for who in ("model", "rule_A"):
+            r = result[who]
+            mlflow.log_metrics({f"{who}.{k}": float(r[k]) for k in
+                                ("iou", "precision", "recall", "auc", "ap", "best_iou", "iou_n300")})
+        return run.info.run_id

@@ -57,6 +57,7 @@ class AoiData:
     labels: dict           # full-grid label bands (for outcome maps)
     valid: np.ndarray      # full-grid VV validity
     pixel_area: float
+    labels_version: str = "1"
 
 
 def load_aoi(name: str, change_tif: Path, labels_tif: Path) -> AoiData:
@@ -74,6 +75,7 @@ def load_aoi(name: str, change_tif: Path, labels_tif: Path) -> AoiData:
             raise ValueError(f"{name}: labels grid differs from change grid")
         ln = list(src.descriptions)
         labels = {n: src.read(ln.index(n) + 1) for n in ln}
+        labels_version = src.tags().get("labels_version", "1")
     valid = b["valid"] > 0
     region = (labels["aoi"] > 0) & (labels["not_analysed"] == 0) & (labels["perm_water"] == 0) & valid
     stack = feature_stack(b)
@@ -82,4 +84,4 @@ def load_aoi(name: str, change_tif: Path, labels_tif: Path) -> AoiData:
     X = stack.reshape(len(FEATURES), -1)[:, idx].T.copy()
     return AoiData(name=name, X=X, y=labels["flood"].ravel()[idx] > 0,
                    frac=labels["flood_frac"].ravel()[idx], idx=idx, shape=shape,
-                   labels=labels, valid=valid, pixel_area=px)
+                   labels=labels, valid=valid, pixel_area=px, labels_version=labels_version)

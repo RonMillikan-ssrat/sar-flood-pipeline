@@ -81,6 +81,21 @@ labels (`mean.iou_n300`), the operational setting the results support.
 MLflow 3 stores scikit-learn models in the skops format; only scikit-learn's
 own types are declared trusted, and the list is recorded on the run.
 
+## Holdout scoring and label versions
+
+`sarflood score-holdout --aoi <aoi> --event <e> --flood-pass <pass>` applies a registered
+model (default: the `champion` alias) to an AOI it was not trained on and logs the result
+to the MLflow experiment `sarflood-holdout`. Every score is reported next to the
+**all-flood baseline** (IoU of a map that calls everything flood = the flood share), since
+a high flood share inflates IoU: on Sanghar (72% flooded) the all-flood map scores 0.721
+and rule A 0.378. AUC and AP are reported because they depend on neither a cut nor the
+flood share.
+
+Each labels GeoTIFF carries a `labels_version` tag (`labels.LABELS_VERSION`; untagged = 1).
+Train-pixels reports and registered versions record it, `fit-final` refuses a report built
+on other labels than those on disk, and `registry promote` refuses to compare gate values
+across label versions; a person decides with `--force`.
+
 ## Orchestration (Airflow)
 
 | DAG | Tasks | Notes |

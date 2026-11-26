@@ -116,3 +116,40 @@ def test_skops_trusted_types_only_sklearn():
     m = HistGradientBoostingClassifier(max_iter=5).fit(X, X[:, 0] > .5)
     types = tracking.skops_trusted_types(m)
     assert types and all(t.startswith("sklearn.") for t in types)
+
+
+def test_promote_refuses_across_labels_versions(store, tmp_path):
+    from tests.test_pixels import make_aoi
+
+    data = [make_aoi(tmp_path, "a", 1)]
+    assert data[0].labels_version == "1"                       # untagged labels file
+    v1, _ = tracking.fit_final(data, "logreg", 1000, 0, 0.70, "r", {})
+    data[0].labels_version = "2"
+    v2, _ = tracking.fit_final(data, "logreg", 1000, 1, 0.90, "r", {})
+    tracking.promote(v1)
+    with pytest.raises(ValueError, match="labels_version differs"):
+        tracking.promote(v2)                                   # better gate, other labels
+    assert tracking.promote(v2, force=True).startswith("PROMOTED")
+    rows = {r["version"]: r for r in tracking.registry_table()}
+    assert (rows[1]["labels_version"], rows[2]["labels_version"]) == ("1", "2")
+    assert tracking.combined_labels_version(["2", "1", "2"]) == "mixed:1,2"
+
+
+def test_holdout_scoring_and_logging(store, tmp_path):
+    from tests.test_pixels import make_aoi
+
+    train = [make_aoi(tmp_path, n, s) for n, s in [("a", 1), ("b", 2)]]
+    v, _ = tracking.fit_final(train, "hgb_bal", 2000, 0, 0.8, "r", {})
+    tracking.promote(v)
+    model, got, tags = tracking.load_version()
+    assert got == v and tags["train_aois"] == "a,b"
+    test = make_aoi(tmp_path, "c", 3)
+    vv = test.X[:, 0]
+    res = tracking.holdout_metrics(model.predict_proba(test.X)[:, 1], test.y, vv)
+    assert res["flood_share"] == pytest.approx(test.y.mean())
+    assert res["model"]["auc"] > 0.95 and res["rule_A"]["best_cut"] < 0   # cut in VV dB
+    assert res["model"]["iou"] > res["flood_share"]                     # skill over all-flood
+    run = tracking.log_holdout("c", v, tags, res, {"event": "e"})
+    r = mlflow.get_run(run)
+    assert r.data.tags["model_version"] == str(v)
+    assert r.data.metrics["model.auc"] == pytest.approx(res["model"]["auc"])

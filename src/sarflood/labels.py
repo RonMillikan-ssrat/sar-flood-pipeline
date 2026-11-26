@@ -34,6 +34,13 @@ from pathlib import Path
 import numpy as np
 
 PERMANENT_WATER = ("BH080", "BH130", "BH140", "BA040")  # lake, reservoir, river, open water
+
+# Bump whenever the label definition changes, so scores and gates from different
+# definitions are never compared silently. Written into each labels GeoTIFF's tags;
+# a file without the tag is version 1.
+#   1  permanent water = BH080, BH140; 2022 GeoJSON packages only
+#   2  permanent water += BH130 reservoir, BA040 open water; 2017 shapefile packages
+LABELS_VERSION = "2"
 LABEL_BANDS = ["flood_frac", "flood", "aoi", "not_analysed", "perm_water"]
 
 
@@ -116,8 +123,19 @@ class Score:
     pred_km2: float
     excluded_mixed: int
 
+    @property
+    def flood_share(self) -> float:
+        return (self.tp + self.fn) / self.n_eval if self.n_eval else float("nan")
+
+    @property
+    def iou_all_flood(self) -> float:
+        """IoU of the trivial map that calls every scored pixel flood (= flood share).
+        A method has skill only to the extent it beats this."""
+        return self.flood_share
+
     def to_dict(self) -> dict:
-        return asdict(self)
+        return {**asdict(self), "flood_share": self.flood_share,
+                "iou_all_flood": self.iou_all_flood, "iou_gain": self.iou - self.iou_all_flood}
 
 
 def score(pred: np.ndarray, labels: dict[str, np.ndarray], valid: np.ndarray,

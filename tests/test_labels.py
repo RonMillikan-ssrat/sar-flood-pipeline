@@ -174,3 +174,11 @@ def test_sweep_no_change_row():
                            change_grid=(None, -3.0), water_grid=(-15.0,))
     by = {r["change_db"]: r["iou"] for r in rows}
     assert by[None] == 1.0 and by[-3.0] == 0.5
+
+
+def test_score_all_flood_baseline():
+    lab = {"aoi": np.ones((2, 2)), "not_analysed": np.zeros((2, 2)), "perm_water": np.zeros((2, 2)),
+           "flood": np.array([[1, 0], [0, 0]], float), "flood_frac": np.zeros((2, 2))}
+    s = score(np.ones((2, 2), bool), lab, np.ones((2, 2), bool), 400.0)
+    assert s.flood_share == 0.25 and s.iou == pytest.approx(s.iou_all_flood)
+    assert s.to_dict()["iou_gain"] == pytest.approx(0.0)
