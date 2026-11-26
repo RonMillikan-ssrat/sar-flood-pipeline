@@ -134,7 +134,8 @@ def test_cli_evaluate_end_to_end(tmp_path, monkeypatch, capsys):
     pf.write_text(json.dumps({"pairs": [{"flood": {"key": "F_KEY"}, "reference": {"key": "R_KEY"},
                                          "reason": "ok"}]}))
     rc = cli.main(["evaluate", "--aoi", "larkana", "--event", "pakistan-2022",
-                   "--flood-pass", "F_KEY", "--ems-zip", str(z), "--sweep", "--hist"])
+                   "--flood-pass", "F_KEY", "--ems-zip", str(z), "--sweep", "--hist",
+                   "--rule", "A", "--rule", "C"])
     assert rc == 0
     out = capsys.readouterr().out
     assert "IoU 1.000" in out
@@ -142,6 +143,10 @@ def test_cli_evaluate_end_to_end(tmp_path, monkeypatch, capsys):
     assert rep["all"]["iou"] == 1.0 and len(rep["sweep"]) == 63
     assert any(r["change_db"] is None for r in rep["sweep"])
     assert rep["hist"]["flood_vv_db"]["best_cut_iou"] == 1.0
+    assert rep["rules"]["A"]["all"]["iou"] == 1.0          # flood VV -22 <= -12, dry -10 > -12
+    assert rep["rules"]["C"]["all"]["iou"] == 1.0          # Otsu splits -22 from -10
+    assert "(otsu)" in rep["rules"]["C"]["rule"]
+    assert len(list((tmp_path / "eval" / "larkana").glob("*_rule_*.png"))) == 2
     assert next((tmp_path / "eval" / "larkana").glob("*_hist.png")).stat().st_size > 1000
     assert next((tmp_path / "eval" / "larkana").glob("*_confusion.png")).stat().st_size > 1000
 

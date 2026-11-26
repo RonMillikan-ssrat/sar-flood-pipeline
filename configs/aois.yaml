@@ -80,3 +80,25 @@ aois:
         end: "2022-09-30"
         notes: "EMSR629 AOI01 DEL v2; SPOT-6/7 30 Aug 2022 05:44 UTC, 4 h after S1A track 78D"
         reference: {start: "2022-03-01", end: "2022-06-01"}  # pre-monsoon; verify
+
+  shikarpur:
+    role: train
+    description: EMSR629 AOI02 Shikarpur (labels = EMS DEL from SPOT-6-7 30/08/2022 T05:45:30Z)
+    bbox: [68.47, 27.74, 68.86, 28.01]
+    events:
+      - name: pakistan-2022
+        start: "2022-08-15"
+        end: "2022-09-30"
+        notes: "EMSR629_AOI02_DEL_PRODUCT_r1_RTP01_v1_vector.zip"
+        reference: {start: "2022-03-01", end: "2022-06-01"}  # copied from larkana; verify
+
+  jacobabad:
+    role: train
+    description: EMSR629 AOI03 Jacobabad (labels = EMS DEL from SPOT-6-7 30/08/2022 T05:44:37Z)
+    bbox: [68.22, 28.09, 68.62, 28.36]
+    events:
+      - name: pakistan-2022
+        start: "2022-08-15"
+        end: "2022-09-30"
+        notes: "EMSR629_AOI03_DEL_PRODUCT_r1_RTP01_v1_vector.zip"
+        reference: {start: "2022-03-01", end: "2022-06-01"}  # copied from larkana; verify

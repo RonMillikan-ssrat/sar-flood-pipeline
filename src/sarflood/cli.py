@@ -453,8 +453,9 @@ def cmd_evaluate(args) -> int:
         band = lambda n: src.read(names.index(n) + 1)
         dvv, fvv = band("dvv_db"), band("flood_vv_db")
         valid, cand = band("valid") > 0, band("candidate") > 0
-        hist_bands = {n: band(n) for n in ("flood_vv_db", "ref_vv_db", "dvv_db", "flood_vh_db")} \
-            if args.hist else {}
+        need = {"flood_vv_db", "ref_vv_db", "dvv_db", "flood_vh_db", "dvh_db"} \
+            if (args.hist or args.rule) else set()
+        hist_bands = {n: band(n) for n in need}
         valid_vh = band("valid_vh") > 0 if "valid_vh" in names else valid
         profile, tags = src.profile, src.tags()
         transform, crs, shape = src.transform, src.crs, src.shape
@@ -505,6 +506,25 @@ def cmd_evaluate(args) -> int:
         edge_c = best["change_db"] is not None and best["change_db"] in (nums[0], nums[-1])
         if edge_c or best["water_db"] in (waters[0], waters[-1]):
             print("  note: best is on the edge of the grid; the optimum may lie beyond it")
+    if args.rule:
+        from .rules import apply_rule, parse_rule
+
+        results["rules"] = {}
+        print("rules (fixed in advance; otsu thresholds come from the change map, not labels):")
+        for spec in args.rule:
+            rule = parse_rule(spec)
+            pred = apply_rule(rule, hist_bands, valid, valid_vh)
+            entry = {"rule": rule.describe()}
+            for name, lo, hi in [("all", None, None), ("pure_only", 0.2, 0.8)]:
+                s = score(pred, labels, valid, px_area, lo, hi)
+                entry[name] = s.to_dict()
+            results["rules"][spec] = entry
+            a, p = entry["all"], entry["pure_only"]
+            print(f"  {spec:<18} [{rule.describe()}]  IoU {a['iou']:.3f}  F1 {a['f1']:.3f}  "
+                  f"P {a['precision']:.3f}  R {a['recall']:.3f}  | pure-only IoU {p['iou']:.3f}")
+            tag = "".join(ch if ch.isalnum() else "_" for ch in spec)
+            confusion_quicklook(pred, labels, valid, out_dir / f"{stem}_{z.stem}_rule_{tag}.png",
+                                title=f"{args.aoi}: rule {spec} [{rule.describe()}] vs {z.stem}")
     if args.hist:
         hpng = out_dir / f"{stem}_{z.stem}_hist.png"
         summ = class_histograms(hist_bands, labels, valid, valid_vh, hpng,
@@ -522,6 +542,29 @@ def cmd_evaluate(args) -> int:
     out = write_json(out_dir / f"{stem}_{z.stem}_score.json",
                      {"change": change_tif.name, "ems_zip": z.name, **results})
     print(f"-> {out}\n-> {png}")
+    return 0
+
+
+def cmd_ems_aoi(args) -> int:
+    from .ems_zip import aoi_from_zip, yaml_entry
+
+    aois = load_aois(args.config)
+    like = aois.get(args.like)
+    if like is None:
+        print(f"--like {args.like!r} is not a configured AOI", file=sys.stderr)
+        return 2
+    if args.name in aois:
+        print(f"AOI {args.name!r} already exists in the config", file=sys.stderr)
+        return 2
+    info = aoi_from_zip(Path(args.zip), margin=args.margin)
+    text = yaml_entry(args.name, info, like, role=args.role)
+    print(f"EMS AOI bounds {[round(v, 4) for v in info['bounds']]} -> bbox {info['bbox']}")
+    print(text)
+    if args.append:
+        cfg = Path(args.config)
+        cfg.write_text(cfg.read_text().rstrip("\n") + "\n" + text)
+        load_aois(cfg)  # re-validate
+        print(f"appended to {cfg}")
     return 0
 
 
@@ -630,7 +673,18 @@ def main(argv: list[str] | None = None) -> int:
                     help="evaluate the change map made with this --smooth (default 1)")
     ev.add_argument("--hist", action="store_true",
                     help="class-conditional distributions (EMS flood vs dry) + best single cuts")
+    ev.add_argument("--rule", action="append", default=[],
+                    help="rule to score, repeatable: preset A/B/C or e.g. 'dvv<=-1,vv<=-12', 'vv<=otsu'")
     ev.set_defaults(func=cmd_evaluate)
+
+    ea = sub.add_parser("ems-aoi", help="make an AOI config entry from an EMS vector package")
+    ea.add_argument("--zip", required=True)
+    ea.add_argument("--name", required=True, help="new AOI name, e.g. shikarpur")
+    ea.add_argument("--like", required=True, help="copy event/reference windows from this AOI")
+    ea.add_argument("--role", default="train", choices=["train", "holdout"])
+    ea.add_argument("--margin", type=float, default=0.01, help="degrees added around the EMS AOI")
+    ea.add_argument("--append", action="store_true", help="append to the config (else just print)")
+    ea.set_defaults(func=cmd_ems_aoi)
 
     args = p.parse_args(argv)
     if args.config is None:

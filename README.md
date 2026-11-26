@@ -23,7 +23,9 @@ terrain, a drift check flags it, and the model registry refuses to promote it.
 | Change detection on the shared grid: optional N×N speckle averaging (linear, unclipped), per-polarization validity, VV/VH dB and change, quick-look, threshold preview | `change.py`, `sarflood change` | **done** |
 | EMS activation check: AOI extents vs ours, product imagery (circularity check) | `ems.py`, `sarflood ems-info` | **built** |
 | Labels: EMS delineation (flood fraction via sub-pixel rasterization, AOI, not-analysed, permanent water) on the change grid; IoU/F1/precision/recall; outcome map; threshold sweep incl. no-change rule; class-conditional distributions + best single cut per variable | `labels.py`, `sarflood evaluate` | **done** |
-| Baseline: Otsu threshold on VV backscatter | | todo |
+| Fixed rules for held-out testing (presets A/B/C), incl. label-free Otsu baseline | `rules.py`, `evaluate --rule` | **built** |
+| AOI entries straight from EMS vector packages | `ems_zip.py`, `sarflood ems-aoi` | **built** |
+| Held-out test: EMSR629 Shikarpur (AOI02), Jacobabad (AOI03) | | todo |
 | Train U-Net | GEAP Pipelines (Kubeflow) | todo |
 | Track, register, gate, roll back | MLflow | todo |
 | Evaluate on holdout AOIs + drift checks | | todo |
@@ -53,6 +55,8 @@ src/sarflood/
   change.py    flood vs reference on the shared grid: dB, change, masks, quick-look
   ems.py       Copernicus EMS Rapid Mapping API: AOIs, products, imagery
   labels.py    EMS vector package -> label rasters on the change grid; scoring
+  rules.py     classification rules (A/B/C presets, Otsu), fixed before held-out tests
+  ems_zip.py   AOI outline + source records from an EMS package
 snap/graphs/  SNAP gpt graphs used as references
   cli.py       run the same logic without Airflow
 tests/      pytest, no network needed
@@ -143,6 +147,12 @@ airflow backfill create --dag-id s1_catalog --from-date 2022-08-15 --to-date 202
   threshold (→ `--smooth`), and VV-only predictions were wrongly dropped where
   VH was negative (→ per-polarization validity). Thresholds tuned on Larkana
   are to be tested on other EMSR629 AOIs, not reported from Larkana itself.
+- **Larkana findings (in-sample).** Flood-pass VV alone separates best (single cut
+  ≈ −11.3 dB after 3×3, IoU 0.78); VH 0.74; VV change 0.72; reference VV 0.59.
+  The change condition adds nothing here: differencing two speckled images adds
+  variance, and the area has few dark dry surfaces. ~10% of EMS-flooded pixels
+  have VV > −12 dB, which caps darkness rules. Rules A/B/C were fixed from this
+  before any held-out scoring.
 - **Pairing rule.** A reference must match the flood pass's relative orbit, orbit
   direction and polarisation, fall in the event's dry-season `reference` window,
   and cover at least 50% of the AOI. The latest qualifying pass wins (least
