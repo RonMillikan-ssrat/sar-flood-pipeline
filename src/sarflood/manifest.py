@@ -19,6 +19,27 @@ def data_root() -> Path:
     return Path(os.environ.get("DATA_ROOT", "data"))
 
 
+def raw_store() -> Path:
+    """Shared store for raw Sentinel-1 zips. Slices don't depend on the AOI, so one
+    folder serves all AOIs (no per-AOI copies or symlinks)."""
+    return data_root() / "raw" / "s1"
+
+
+def find_raw(zip_name: str) -> Path | None:
+    """Existing zip in the shared store, else in a legacy per-AOI folder
+    (data/raw/<aoi>/, possibly a symlink), else None."""
+    p = raw_store() / zip_name
+    if p.is_file():
+        return p
+    raw = data_root() / "raw"
+    if raw.is_dir():
+        for d in sorted(raw.iterdir()):
+            q = d / zip_name
+            if d.name != "s1" and d.is_dir() and q.is_file():
+                return q
+    return None
+
+
 def manifest_path(aoi: str, start: datetime, end: datetime, root: Path | None = None) -> Path:
     root = root or data_root()
     fname = f"{start:%Y%m%dT%H%M}_{end:%Y%m%dT%H%M}.json"

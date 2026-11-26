@@ -30,6 +30,7 @@ terrain, a drift check flags it, and the model registry refuses to promote it.
 | U-Net (plain PyTorch, ~7.8M params), leave-one-AOI-out vs rule A; fp16 on CUDA | `unet.py`, `sarflood train-unet` | **built** |
 | GEAP Pipelines (Kubeflow) training | | todo |
 | Track (ingest LOAO reports), register final pixel model, gated promotion, rollback | `tracking.py`, `sarflood mlflow-log / fit-final / registry` (MLflow 3) | **built** |
+| Orchestration: per-event processing (mapped per AOI, SNAP pool of 1), train → log → register → gated promote, rollback | Airflow DAGs `sarflood_process_event`, `sarflood_train_and_register`, `sarflood_rollback_champion` | **built** |
 | Evaluate on holdout AOIs + drift checks | | todo |
 
 ## Results so far
@@ -79,6 +80,37 @@ The gate metric is the mean held-out IoU with the cut chosen from 300 local
 labels (`mean.iou_n300`), the operational setting the results support.
 MLflow 3 stores scikit-learn models in the skops format; only scikit-learn's
 own types are declared trusted, and the list is recorded on the run.
+
+## Orchestration (Airflow)
+
+| DAG | Tasks | Notes |
+|---|---|---|
+| `sarflood_process_event` | `aoi_list` → per AOI (mapped): `pairs` → `download` → `orbits` → `terrain_correct` → `change` → `evaluate` | Network steps retry 3×. `terrain_correct` runs in pool `snap` (1 slot: one SNAP job at a time, it takes ~9 GB heap) with no retries and a 2 h timeout. Needs SNAP and CDSE credentials. |
+| `sarflood_train_and_register` | `train_pixels` → `mlflow_log` → `fit_final` → `promote` | A gate rejection shows as **skipped** `promote`, not failed: `registry promote` exits 1 on rejection, the task maps that to 99, and Airflow's bash tasks treat exit 99 as skip. |
+| `sarflood_rollback_champion` | `rollback` → `show` | Swaps `champion` and `previous` aliases. |
+
+All three are manual-trigger (`schedule=None`) and take run parameters
+(`-c '{...}'` or the trigger form in the UI). The tasks shell out to the
+project venv's `sarflood`, so Airflow and its pinned dependencies live in a
+separate venv and the DAGs import nothing from `src/`.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SARFLOOD_REPO` | parent of `dags/` | working directory for tasks |
+| `SARFLOOD_BIN` | `$SARFLOOD_REPO/.venv/bin/sarflood` | CLI the tasks run |
+| `SARFLOOD_DATA_ROOT` | `$SARFLOOD_REPO/data` | passed to tasks as `DATA_ROOT`; report and EMS zip paths are built from it |
+
+Where it runs: `process_event` needs SNAP and the raw `.SAFE` data (laptop);
+`train_and_register` and `rollback_champion` need only the change/label rasters
+and the MLflow store (desktop).
+
+```bash
+airflow pools set snap 1 "one SNAP gpt job at a time"
+airflow dags test sarflood_process_event -c '{"aois": ["larkana"]}'
+airflow dags test sarflood_train_and_register                         # first run: promotes v1
+airflow dags test sarflood_train_and_register -c '{"min_delta": 0.01}' # same model: promote skipped
+airflow dags test sarflood_rollback_champion
+```
 
 ## Areas of interest
 
@@ -143,20 +175,24 @@ machine identity.dataspace.copernicus.eu login you@example.com password ...
 sarflood -v download --aoi sindh --event pakistan-2022 --flood-pass S1A_044775_0558C6
 ```
 
-Airflow 3.4, installed with its constraints file so dependency versions match
-what Airflow was tested against:
+Airflow 3.4 in its own venv (outside the repo), installed with its constraints
+file so dependency versions match what Airflow was tested against:
 
 ```bash
+uv venv --python 3.12 ~/venvs/airflow && source ~/venvs/airflow/bin/activate
 uv pip install "apache-airflow==3.4.0" \
   --constraint https://raw.githubusercontent.com/apache/airflow/constraints-3.4.0/constraints-3.12.txt
+uv pip install pytest
+uv pip install -e . --no-deps     # s1_catalog imports sarflood (needs only requests + pyyaml, which Airflow has)
 
 export AIRFLOW_HOME=$PWD/airflow_home
 export AIRFLOW__CORE__DAGS_FOLDER=$PWD/dags
 export AIRFLOW__CORE__LOAD_EXAMPLES=False
-export DATA_ROOT=$PWD/data
+export DATA_ROOT=$PWD/data SARFLOOD_DATA_ROOT=$PWD/data
 
 airflow db migrate
 airflow dags list-import-errors
+python -m pytest -q tests/test_dags.py      # DAG structure checks (skipped in the project venv)
 airflow dags test s1_catalog 2022-08-29     # one run, in-process; queries 2022-08-28 -> 08-29
 ```
 

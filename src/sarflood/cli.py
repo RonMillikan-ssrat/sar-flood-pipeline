@@ -160,9 +160,17 @@ def cmd_download(args) -> int:
     if args.dry_run:
         return 0
 
-    dest = data_root() / "raw" / args.aoi
-    auth = CDSEAuth()
+    from .manifest import find_raw, raw_store
+
+    auth = None
     for role, key, pid, name in jobs:
+        zip_name = name.removesuffix(".SAFE") + ".zip"
+        existing = find_raw(zip_name)
+        # Already downloaded (shared store or a legacy per-AOI folder): let download_product
+        # check its size there and skip; new files go to the shared store.
+        dest = existing.parent if existing else raw_store()
+        if existing is None or (sizes[pid] and existing.stat().st_size != sizes[pid]):
+            auth = auth or CDSEAuth()
         path = download_product(pid, name, dest, auth, expected_size=sizes[pid])
         print(f"  ok {path}")
     return 0
@@ -308,7 +316,8 @@ def cmd_terrain_correct(args) -> int:
 
     x0, y0, x1, y1 = aoi.bbox
     epsg = args.epsg or utm_epsg((x0 + x1) / 2, (y0 + y1) / 2)
-    raw = data_root() / "raw" / args.aoi
+    from .manifest import find_raw, raw_store
+
     out_dir = data_root() / "tc" / args.aoi
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -318,7 +327,8 @@ def cmd_terrain_correct(args) -> int:
         if ps is None:
             print(f"{args.flood_pass}: no {role} pass ({pair['reason']})", file=sys.stderr)
             return 2
-        zips = [(raw / (n.removesuffix(".SAFE") + ".zip")).resolve() for n in ps["slices"]]
+        names = [n.removesuffix(".SAFE") + ".zip" for n in ps["slices"]]
+        zips = [(find_raw(n) or raw_store() / n).resolve() for n in names]
         missing = [z for z in zips if not z.exists()]
         if missing:
             print(f"{role} {ps['key']}: missing {[z.name for z in missing]}; run 'sarflood download'",
@@ -797,10 +807,14 @@ def cmd_registry(args) -> int:
             print(f"  v{r['version']:<3} {r['method'] or '?':<11} gate {r['gate_value'] or '-':<9} "
                   f"{r['created']}  {' '.join(r['aliases'])}")
     elif args.action == "promote":
-        if args.version is None:
-            print("promote needs --version", file=sys.stderr)
+        version = args.version
+        if args.latest:
+            rows = registry_table()
+            version = rows[-1]["version"] if rows else None
+        if version is None:
+            print("promote needs --version N or --latest (and a registered version)", file=sys.stderr)
             return 2
-        msg = promote(args.version, args.min_delta, args.force)
+        msg = promote(version, args.min_delta, args.force)
         print(msg)
         return 1 if msg.startswith("REJECTED") else 0
     else:
@@ -974,6 +988,7 @@ def main(argv: list[str] | None = None) -> int:
     rg = sub.add_parser("registry", help="model registry: show, promote (gated), rollback")
     rg.add_argument("action", choices=["show", "promote", "rollback"])
     rg.add_argument("--version", type=int)
+    rg.add_argument("--latest", action="store_true", help="promote: use the newest version")
     rg.add_argument("--min-delta", type=float, default=0.0,
                     help="candidate must beat the champion's gate metric by this much")
     rg.add_argument("--force", action="store_true", help="promote without the gate")

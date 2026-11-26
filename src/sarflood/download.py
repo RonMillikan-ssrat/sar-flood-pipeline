@@ -64,7 +64,7 @@ def _open_stream(url: str, auth: CDSEAuth, session: requests.Session,
     raise RuntimeError(f"too many redirects for {url}")
 
 
-def download_product(product_id: str, name: str, dest_dir: Path, auth: CDSEAuth,
+def download_product(product_id: str, name: str, dest_dir: Path, auth: CDSEAuth | None,
                      expected_size: int | None = None,
                      session: requests.Session | None = None,
                      out_name: str | None = None) -> Path:
@@ -77,6 +77,8 @@ def download_product(product_id: str, name: str, dest_dir: Path, auth: CDSEAuth,
         log.info("skip (complete): %s", out.name)
         return out
 
+    if auth is None:
+        raise RuntimeError(f"{name}: not downloaded yet and no credentials were given")
     part = out.with_name(out.name + ".part")
     written = 0
     with _open_stream(DOWNLOAD_URL.format(id=product_id), auth, sess) as r, open(part, "wb") as f:
