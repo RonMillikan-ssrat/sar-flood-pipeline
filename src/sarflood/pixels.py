@@ -144,8 +144,9 @@ def permutation_importance_iou(model, X: np.ndarray, y: np.ndarray, rng: np.rand
 
 def leave_one_aoi_out(data: list[AoiData], n_train: int = 200_000, seed: int = 0,
                       importance: bool = True) -> dict:
-    rng = np.random.default_rng(seed)
-    vv_col = FEATURES.index("vv")
+    rng = np.random.default_rng(seed)               # training samples, importance
+    fs_rng = np.random.default_rng(seed + 10_000)   # few-label draws: separate stream, so
+    vv_col = FEATURES.index("vv")                   # adding them doesn't shift training
     results = {"features": FEATURES, "n_train_per_aoi": n_train, "folds": {}}
     for test in data:
         train = [d for d in data if d is not test]
@@ -155,7 +156,7 @@ def leave_one_aoi_out(data: list[AoiData], n_train: int = 200_000, seed: int = 0
         rule_a = {**metrics(vv <= RULE_A_DB, test.y), **threshold_free(-vv, test.y)}
         rule_a["best_cut"] = -rule_a["best_cut"]   # score was -VV; report the cut as VV dB
         fold["rule_A"] = rule_a
-        fold["fewshot"] = {"vv": fewshot_iou(vv, test.y, rng)}
+        fold["fewshot"] = {"vv": fewshot_iou(vv, test.y, fs_rng)}
         for balanced in (False, True):
             parts = [sample_pure(d, n_train, rng, balanced) for d in train]
             Xtr = np.concatenate([p[0] for p in parts])
@@ -173,6 +174,6 @@ def leave_one_aoi_out(data: list[AoiData], n_train: int = 200_000, seed: int = 0
                     entry["std_coefficients"] = dict(zip(FEATURES, map(float, model[-1].coef_[0])))
                 entry["_prob"] = prob      # removed before JSON; used for maps
                 fold["models"][key] = entry
-                fold["fewshot"][key] = fewshot_iou(-prob, test.y, rng)
+                fold["fewshot"][key] = fewshot_iou(-prob, test.y, fs_rng)
         results["folds"][test.name] = fold
     return results

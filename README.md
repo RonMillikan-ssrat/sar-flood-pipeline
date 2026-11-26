@@ -29,7 +29,7 @@ terrain, a drift check flags it, and the model registry refuses to promote it.
 | Pixel classifiers (logistic regression, gradient boosting), leave-one-AOI-out vs rule A | `features.py`, `pixels.py`, `sarflood train-pixels` | **built** |
 | U-Net (plain PyTorch, ~7.8M params), leave-one-AOI-out vs rule A; fp16 on CUDA | `unet.py`, `sarflood train-unet` | **built** |
 | GEAP Pipelines (Kubeflow) training | | todo |
-| Track, register, gate, roll back | MLflow | todo |
+| Track (ingest LOAO reports), register final pixel model, gated promotion, rollback | `tracking.py`, `sarflood mlflow-log / fit-final / registry` (MLflow 3) | **built** |
 | Evaluate on holdout AOIs + drift checks | | todo |
 
 ## Results so far
@@ -55,6 +55,30 @@ only slightly better than VV (AUC +0.005 to +0.013); the ideal VV cut varies
 ~3 dB between AOIs (-11.3 / -9.7 / -12.6 dB). Label-free adaptive cuts (Otsu,
 2-component GMM) land 2.5-5 dB stricter than the ideal: they find open water,
 while EMS "flooded area" also includes brighter flooded ground.
+
+U-Net (7.8M params, 20 epochs): 0.757 / 0.642 / 0.686, no better than rule A or
+the pixel models out of area (AUC equal or lower). Choosing the cut from ~300
+random labeled pixels of the target area recovers nearly the ceiling everywhere;
+with that, hgb_bal reaches 0.783 / 0.815 / 0.699 (mean 0.766 vs 0.733 for rule A
+at -12 dB).
+
+## Model registry (MLflow)
+
+```bash
+uv pip install -e ".[tracking]"
+sarflood mlflow-log data/ml/pixels/*_loao.json data/ml/unet/*_loao.json
+sarflood fit-final --method hgb_bal --report data/ml/pixels/<...>_loao.json \
+    --aoi larkana --aoi shikarpur --aoi jacobabad --event pakistan-2022 --flood-pass <key>
+sarflood registry show
+sarflood registry promote --version 1        # gate: beat the champion's mean.iou_n300
+sarflood registry rollback                   # champion <-> previous
+mlflow ui --backend-store-uri sqlite:///data/mlflow/mlflow.db
+```
+
+The gate metric is the mean held-out IoU with the cut chosen from 300 local
+labels (`mean.iou_n300`), the operational setting the results support.
+MLflow 3 stores scikit-learn models in the skops format; only scikit-learn's
+own types are declared trusted, and the list is recorded on the run.
 
 ## Areas of interest
 
@@ -86,6 +110,7 @@ src/sarflood/
   features.py  per-pixel features (backscatter, change, ratios, 7x7 context)
   pixels.py    leave-one-AOI-out training/scoring of pixel classifiers
   unet.py      U-Net: tiles, masked class-balanced loss, overlapping-tile prediction
+  tracking.py  MLflow: report ingestion, final-model registration, champion gate, rollback
 snap/graphs/  SNAP gpt graphs used as references
   cli.py       run the same logic without Airflow
 tests/      pytest, no network needed

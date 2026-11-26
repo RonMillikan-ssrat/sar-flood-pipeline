@@ -731,6 +731,83 @@ def cmd_train_unet(args) -> int:
     return 0
 
 
+def _kv(pairs: list[str]) -> dict:
+    out = {}
+    for s in pairs:
+        if "=" not in s:
+            raise SystemExit(f"--tag expects key=value, got {s!r}")
+        k, v = s.split("=", 1)
+        out[k] = v
+    return out
+
+
+def cmd_mlflow_log(args) -> int:
+    from .tracking import log_report
+
+    rc = 0
+    for r in args.report:
+        path = Path(r)
+        if not path.exists():
+            print(f"{path} not found", file=sys.stderr)
+            rc = 2
+            continue
+        run = log_report(path, tags=_kv(args.tag), force=args.force)
+        print(f"{path.name}: " + (f"logged run {run}" if run else "already logged (same SHA-256); "
+                                  "use --force to log again"))
+    return rc
+
+
+def cmd_fit_final(args) -> int:
+    from .features import load_aoi
+    from .tracking import fit_final, gate_value_from_report
+
+    report = Path(args.report)
+    if not report.exists():
+        print(f"{report} not found", file=sys.stderr)
+        return 2
+    gate = gate_value_from_report(report, args.method)
+    data = []
+    for a in args.aoi:
+        pair = _load_pair(a, args.event, args.flood_pass)
+        if pair is None or pair["reference"] is None:
+            return 2
+        stem = _change_stem(pair, args.spacing, args.smooth)
+        ctif = data_root() / "change" / a / f"{stem}_change.tif"
+        labs = sorted((data_root() / "eval" / a).glob(f"{stem}_EMSR*_labels.tif"))
+        if not ctif.exists() or len(labs) != 1:
+            print(f"{a}: missing change map or labels for --smooth {args.smooth}", file=sys.stderr)
+            return 2
+        data.append(load_aoi(a, ctif, labs[0]))
+    v, run = fit_final(data, args.method, args.samples, args.seed, gate, report.name,
+                       {"flood_pass": args.flood_pass, "event": args.event,
+                        "smooth": str(args.smooth)})
+    print(f"registered sarflood-pixel-flood v{v} ({args.method}, run {run}); "
+          f"gate mean.iou_n300 = {gate:.4f} from {report.name}")
+    return 0
+
+
+def cmd_registry(args) -> int:
+    from .tracking import promote, registry_table, rollback
+
+    if args.action == "show":
+        rows = registry_table()
+        if not rows:
+            print("no registered versions")
+        for r in rows:
+            print(f"  v{r['version']:<3} {r['method'] or '?':<11} gate {r['gate_value'] or '-':<9} "
+                  f"{r['created']}  {' '.join(r['aliases'])}")
+    elif args.action == "promote":
+        if args.version is None:
+            print("promote needs --version", file=sys.stderr)
+            return 2
+        msg = promote(args.version, args.min_delta, args.force)
+        print(msg)
+        return 1 if msg.startswith("REJECTED") else 0
+    else:
+        print(rollback())
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="sarflood")
     p.add_argument("--config", default=None, help="path to aois.yaml")
@@ -875,6 +952,32 @@ def main(argv: list[str] | None = None) -> int:
     tu.add_argument("--seed", type=int, default=0)
     tu.add_argument("--device", default="auto", help="auto, cuda or cpu")
     tu.set_defaults(func=cmd_train_unet)
+
+    ml = sub.add_parser("mlflow-log", help="ingest LOAO report(s) into MLflow")
+    ml.add_argument("report", nargs="+", help="data/ml/.../*_loao.json")
+    ml.add_argument("--tag", action="append", default=[], help="key=value, repeatable")
+    ml.add_argument("--force", action="store_true", help="log again even if already logged")
+    ml.set_defaults(func=cmd_mlflow_log)
+
+    ff = sub.add_parser("fit-final", help="train a pixel model on all AOIs and register it")
+    ff.add_argument("--method", required=True, help="logreg, hgb, logreg_bal or hgb_bal")
+    ff.add_argument("--report", required=True, help="pixels LOAO JSON that supplies the gate metric")
+    ff.add_argument("--aoi", action="append", required=True)
+    ff.add_argument("--event", required=True)
+    ff.add_argument("--flood-pass", required=True)
+    ff.add_argument("--smooth", type=int, default=3)
+    ff.add_argument("--spacing", type=float, default=20.0)
+    ff.add_argument("--samples", type=int, default=200_000)
+    ff.add_argument("--seed", type=int, default=0)
+    ff.set_defaults(func=cmd_fit_final)
+
+    rg = sub.add_parser("registry", help="model registry: show, promote (gated), rollback")
+    rg.add_argument("action", choices=["show", "promote", "rollback"])
+    rg.add_argument("--version", type=int)
+    rg.add_argument("--min-delta", type=float, default=0.0,
+                    help="candidate must beat the champion's gate metric by this much")
+    rg.add_argument("--force", action="store_true", help="promote without the gate")
+    rg.set_defaults(func=cmd_registry)
 
     args = p.parse_args(argv)
     if args.config is None:
