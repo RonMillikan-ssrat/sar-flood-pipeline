@@ -569,6 +569,8 @@ def cmd_ems_aoi(args) -> int:
     info = aoi_from_zip(Path(args.zip), margin=args.margin)
     text = yaml_entry(args.name, info, like, role=args.role)
     print(f"EMS AOI bounds {[round(v, 4) for v in info['bounds']]} -> bbox {info['bbox']}")
+    for w in info.get("warnings", []):
+        print(f"WARNING: {w}")
     print(text)
     if args.append:
         cfg = Path(args.config)

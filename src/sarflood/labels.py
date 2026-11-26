@@ -5,9 +5,13 @@ EMSR629 AOI01 DEL v2:
     observedEventA   flood polygons (notation 'Flooded area')
     areaOfInterestA  AOI outline
     imageFootprintA  obj_type 'Not Analysed' = areas EMS did not assess
-    hydrographyA     obj_type BH080-Lake / BH140-River = permanent water.
+    hydrographyA     obj_type BH080-Lake / BH130-Reservoir / BH140-River /
+                     BA040-Open Water = permanent water.
                      BH090-Land Subject to Inundation is floodable land, not water,
                      so it is NOT part of the permanent-water mask.
+
+Older (2017-era) shapefile-only packages are read by `ems_legacy`, which maps
+their layers onto the same four roles.
 
 Flood polygons are traced from 6 m optical imagery; our grid is 20 m. Each pixel's
 flood *fraction* is estimated by rasterizing on a finer grid (supersample x
@@ -29,7 +33,7 @@ from pathlib import Path
 
 import numpy as np
 
-PERMANENT_WATER = ("BH080", "BH140")  # lake, river (obj_type prefixes)
+PERMANENT_WATER = ("BH080", "BH130", "BH140", "BA040")  # lake, reservoir, river, open water
 LABEL_BANDS = ["flood_frac", "flood", "aoi", "not_analysed", "perm_water"]
 
 
@@ -63,15 +67,30 @@ def _burn(geoms: list[dict], shape: tuple[int, int], transform, supersample: int
     return fine.reshape(h, supersample, w, supersample).mean(axis=(1, 3)).astype(np.float32)
 
 
-def rasterize_ems(zip_path: Path, shape: tuple[int, int], transform, crs,
-                  supersample: int = 5) -> dict[str, np.ndarray]:
+def read_package(zip_path: Path) -> dict[str, list[dict]]:
+    """Flood, AOI, not-analysed and permanent-water features (EPSG:4326), either layout."""
+    from . import ems_legacy
+
     with zipfile.ZipFile(zip_path) as zf:
+        if ems_legacy.is_legacy(zf):
+            return ems_legacy.label_layers(zf, PERMANENT_WATER)
         flood = read_layer(zf, "observedEventA")
         aoi = read_layer(zf, "areaOfInterestA")
         foot = read_layer(zf, "imageFootprintA")
         hydro = read_layer(zf, "hydrographyA")
-    na = [f for f in foot if f["properties"].get("obj_type") == "Not Analysed"]
-    perm = [f for f in hydro if str(f["properties"].get("obj_type", "")).startswith(PERMANENT_WATER)]
+    if not flood and not aoi:
+        raise ValueError(f"{Path(zip_path).name}: no observedEventA / areaOfInterestA layers "
+                         "and not a recognised older package")
+    return {"flood": flood, "aoi": aoi,
+            "not_analysed": [f for f in foot if f["properties"].get("obj_type") == "Not Analysed"],
+            "perm_water": [f for f in hydro
+                           if str(f["properties"].get("obj_type", "")).startswith(PERMANENT_WATER)]}
+
+
+def rasterize_ems(zip_path: Path, shape: tuple[int, int], transform, crs,
+                  supersample: int = 5) -> dict[str, np.ndarray]:
+    layers = read_package(zip_path)
+    flood, aoi, na, perm = (layers[k] for k in ("flood", "aoi", "not_analysed", "perm_water"))
     frac = _burn(_to_crs(flood, crs), shape, transform, supersample)
     return {
         "flood_frac": frac,

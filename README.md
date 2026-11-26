@@ -24,7 +24,7 @@ terrain, a drift check flags it, and the model registry refuses to promote it.
 | EMS activation check: AOI extents vs ours, product imagery (circularity check) | `ems.py`, `sarflood ems-info` | **built** |
 | Labels: EMS delineation (flood fraction via sub-pixel rasterization, AOI, not-analysed, permanent water) on the change grid; IoU/F1/precision/recall; outcome map; threshold sweep incl. no-change rule; class-conditional distributions + best single cut per variable | `labels.py`, `sarflood evaluate` | **done** |
 | Fixed rules for held-out testing (presets A/B/C), incl. label-free Otsu baseline | `rules.py`, `evaluate --rule` | **built** |
-| AOI entries straight from EMS vector packages | `ems_zip.py`, `sarflood ems-aoi` | **built** |
+| AOI entries straight from EMS vector packages, 2022 and 2017 layouts | `ems_zip.py`, `ems_legacy.py`, `sarflood ems-aoi` | **built** |
 | Held-out test: EMSR629 Shikarpur (AOI02), Jacobabad (AOI03) | `evaluate --rule` | **done** (table below) |
 | Pixel classifiers (logistic regression, gradient boosting), leave-one-AOI-out vs rule A | `features.py`, `pixels.py`, `sarflood train-pixels` | **built** |
 | U-Net (plain PyTorch, ~7.8M params), leave-one-AOI-out vs rule A; fp16 on CUDA | `unet.py`, `sarflood train-unet` | **built** |
@@ -138,7 +138,8 @@ src/sarflood/
   ems.py       Copernicus EMS Rapid Mapping API: AOIs, products, imagery
   labels.py    EMS vector package -> label rasters on the change grid; scoring
   rules.py     classification rules (A/B/C presets, Otsu), fixed before held-out tests
-  ems_zip.py   AOI outline + source records from an EMS package
+  ems_zip.py   AOI outline + source records from an EMS package; flags suspect flood sources
+  ems_legacy.py  older (2017) shapefile-only EMS packages -> same label roles
   features.py  per-pixel features (backscatter, change, ratios, 7x7 context)
   pixels.py    leave-one-AOI-out training/scoring of pixel classifiers
   unet.py      U-Net: tiles, masked class-balanced loss, overlapping-tile prediction
@@ -184,6 +185,7 @@ uv pip install "apache-airflow==3.4.0" \
   --constraint https://raw.githubusercontent.com/apache/airflow/constraints-3.4.0/constraints-3.12.txt
 uv pip install pytest
 uv pip install -e . --no-deps     # s1_catalog imports sarflood (needs only requests + pyyaml, which Airflow has)
+rm ~/venvs/airflow/bin/sarflood   # that CLI lacks its dependencies; tasks use $SARFLOOD_BIN
 
 export AIRFLOW_HOME=$PWD/airflow_home
 export AIRFLOW__CORE__DAGS_FOLDER=$PWD/dags

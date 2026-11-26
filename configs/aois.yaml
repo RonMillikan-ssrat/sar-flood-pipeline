@@ -102,3 +102,25 @@ aois:
         end: "2022-09-30"
         notes: "EMSR629_AOI03_DEL_PRODUCT_r1_RTP01_v1_vector.zip"
         reference: {start: "2022-03-01", end: "2022-06-01"}  # copied from larkana; verify
+
+  sanghar:
+    role: holdout
+    description: EMSR631 AOI01 Sanghar (labels = EMS DEL, likely PlanetScope 09/09/2022 T05:36:42Z; package dmg_src_id points to a 2021 pre-event image)
+    bbox: [68.89, 25.99, 69.01, 26.10]
+    events:
+      - name: pakistan-2022
+        start: "2022-08-15"
+        end: "2022-09-30"
+        notes: "EMSR631_AOI01_DEL_PRODUCT_r1_RTP01_v1_vector.zip"
+        reference: {start: "2022-03-01", end: "2022-06-01"}  # copied from larkana; verify
+
+  khipro:
+    role: holdout
+    description: EMSR631 AOI02 Khipro (labels = EMS DEL from Sentinel-2 20/09/2022 T06:12:05Z)
+    bbox: [69.28, 25.76, 69.45, 25.88]
+    events:
+      - name: pakistan-2022
+        start: "2022-08-15"
+        end: "2022-09-30"
+        notes: "EMSR631_AOI02_DEL_PRODUCT_r1_RTP01_v1_vector.zip"
+        reference: {start: "2022-03-01", end: "2022-06-01"}  # copied from larkana; verify
