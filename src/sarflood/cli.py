@@ -568,6 +568,21 @@ def cmd_ems_aoi(args) -> int:
     return 0
 
 
+def _print_fewshot(name: str, fold: dict, fixed: dict) -> None:
+    """fixed: score name -> (IoU at its fixed cut, best-cut IoU ceiling)."""
+    fs = fold["fewshot"]
+    ns = list(next(iter(fs.values())).keys())
+    print(f"  {name:<10} few-label cut (mean IoU over 50 draws; [p10-p90] at n=100)")
+    print(f"  {'':<10} {'score':<11} {'fixed':>6} " + "".join(f"{'n=' + n:>8}" for n in ns)
+          + f" {'p10-p90@100':>13} {'ceiling':>8}")
+    for score, d in fs.items():
+        fx, ceil = fixed.get(score, (float("nan"), float("nan")))
+        band = d.get("100")
+        rng_s = f"{band['p10']:.3f}-{band['p90']:.3f}" if band else ""
+        print(f"  {'':<10} {score:<11} {fx:6.3f} " + "".join(f"{d[n]['mean']:8.3f}" for n in ns)
+              + f" {rng_s:>13} {ceil:8.3f}")
+
+
 def cmd_train_pixels(args) -> int:
     import numpy as np
 
@@ -627,6 +642,9 @@ def cmd_train_pixels(args) -> int:
                                     out_dir / f"{tag}_{test.name}_{m}_confusion.png",
                                     title=f"{test.name} held out: {m} "
                                           f"(trained on {', '.join(fold['train_aois'])})")
+        fixed = {"vv": (a["iou"], a["best_iou"])}
+        fixed.update({m: (e["metrics"]["iou"], e["best_iou"]) for m, e in fold["models"].items()})
+        _print_fewshot(test.name, fold, fixed)
         for m in ("hgb", "hgb_bal"):
             imp = fold["models"].get(m, {}).get("perm_importance_iou")
             if imp:
@@ -691,6 +709,8 @@ def cmd_train_unet(args) -> int:
         ep = f["epochs"]
         print(f"  {'':<10} params {f['params']:,}  train {f['train_seconds']:.0f}s  "
               f"loss {ep[0]['loss']:.3f} -> {ep[-1]['loss']:.3f}")
+        _print_fewshot(g.name, f, {"vv": (f["rule_A"]["iou"], f["rule_A"]["best_iou"]),
+                                   "unet": (f["unet"]["iou"], f["unet"]["best_iou"])})
         prob = f.pop("_prob_grid")
         with rasterio.open(ctif) as src:
             prof = src.profile

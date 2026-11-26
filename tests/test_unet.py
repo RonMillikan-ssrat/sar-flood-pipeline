@@ -125,5 +125,6 @@ def test_cli_train_unet(tmp_path, monkeypatch, capsys):
     assert "_prob_grid" not in json.dumps(rep)
     f = rep["folds"]["larkana"]
     assert f["train_aois"] == ["shikarpur"] and len(f["epochs"]) == 2
+    assert set(f["fewshot"]) == {"vv", "unet"} and "few-label cut" in out
     assert len(list(d.glob("*_prob.tif"))) == 2 and len(list(d.glob("*_confusion.png"))) == 2
     assert len(list((d / "F_s3_b4_e2_models").glob("unet_heldout_*.pt"))) == 2

@@ -89,6 +89,7 @@ def test_loao_model_beats_rule_a_on_flooded_vegetation(tmp_path):
         assert fold["models"]["hgb"]["auc"] > a["auc"]        # VH - VV ranks the vegetation
         assert 0 <= a["best_iou"] <= 1 and np.isfinite(a["best_cut"])
         assert a["best_cut"] < 0          # reported as a VV threshold in dB
+        assert {"vv", "hgb", "hgb_bal", "logreg", "logreg_bal"} <= set(fold["fewshot"])
         # Rule A misses the bright flooded vegetation; the model catches it from VH - VV.
         assert a["recall"] < 0.7, name
         assert hgb["iou"] > 0.95 and hgb["iou"] > a["iou"] + 0.2, name
@@ -156,3 +157,29 @@ def test_threshold_free_perfect_and_reversed():
     assert good["auc"] == 1.0 and good["best_iou"] == 1.0
     bad = threshold_free(np.array([0.1, 0.2, 0.8, 0.9]), truth)
     assert bad["auc"] == 0.0
+
+
+def test_best_cut_exact():
+    from sarflood.pixels import best_cut_exact
+
+    x = np.array([-22.0, -20.0, -15.0, -8.0, -6.0])
+    y = np.array([1, 1, 1, 0, 0], bool)
+    assert best_cut_exact(x, y) == -15.0
+    assert best_cut_exact(x, np.zeros(5, bool)) == float("-inf")
+    assert best_cut_exact(x, np.ones(5, bool)) == float("inf")
+    ties = np.array([-10.0, -10.0, -5.0])          # a cut must not split tied values
+    assert best_cut_exact(ties, np.array([1, 0, 0], bool)) == -10.0
+
+
+def test_fewshot_approaches_ceiling():
+    from sarflood.pixels import fewshot_iou
+
+    rng = np.random.default_rng(0)
+    n = 20_000
+    y = rng.random(n) < 0.5
+    x = np.where(y, rng.normal(-18, 2, n), rng.normal(-9, 2, n))   # separable-ish
+    fs = fewshot_iou(x, y, rng, ns=(25, 1000), reps=20)
+    ceil = max((y & (x <= t)).sum() / (y | (x <= t)).sum() for t in np.linspace(-16, -11, 101))
+    assert fs["1000"]["mean"] > ceil - 0.01
+    assert fs["25"]["mean"] <= fs["1000"]["mean"] + 1e-9
+    assert fs["25"]["p10"] <= fs["25"]["mean"] <= fs["25"]["p90"]

@@ -70,6 +70,50 @@ def threshold_free(score: np.ndarray, truth: np.ndarray) -> dict:
             "best_iou": best["iou"], "best_cut": -best["t"]}
 
 
+FEWSHOT_NS = (25, 100, 300, 1000, 3000)
+
+
+def best_cut_exact(x: np.ndarray, y: np.ndarray) -> float:
+    """Cut t maximizing IoU of 'x <= t' on a (small) labeled sample, searched over
+    the sample's own values. All-dry sample -> -inf (predict nothing);
+    all-flood sample -> +inf (predict everything)."""
+    if not y.any():
+        return float("-inf")
+    if y.all():
+        return float("inf")
+    order = np.argsort(x, kind="stable")
+    xs, ys = x[order], y[order]
+    tp = np.cumsum(ys)                      # flood pixels at or below each cut
+    k = np.arange(1, xs.size + 1)           # predicted flood count
+    iou = tp / (ys.sum() + k - tp)
+    last = np.r_[xs[1:] != xs[:-1], True]   # only cut after the last of tied values
+    i = int(np.argmax(np.where(last, iou, -1)))
+    return float(xs[i])
+
+
+def fewshot_iou(x: np.ndarray, truth: np.ndarray, rng: np.random.Generator,
+                ns=FEWSHOT_NS, reps: int = 50) -> dict:
+    """Choose the cut from n random labeled pixels of the test area, apply it to all
+    pixels, repeat. x: lower = more flood-like (use -prob for probabilities).
+    Random pixels are an optimistic stand-in for an analyst's (clustered) spot checks."""
+    out = {}
+    N = x.size
+    for n in ns:
+        if n > N:
+            continue
+        ious, cuts = [], []
+        for _ in range(reps):
+            s = rng.choice(N, n, replace=False)
+            t = best_cut_exact(x[s], truth[s])
+            ious.append(metrics(x <= t, truth)["iou"])
+            cuts.append(t)
+        ious = np.array(ious)
+        out[str(n)] = {"mean": float(ious.mean()), "p10": float(np.percentile(ious, 10)),
+                       "p90": float(np.percentile(ious, 90)),
+                       "median_cut": float(np.median(cuts))}
+    return out
+
+
 def make_models(seed: int = 0) -> dict:
     from sklearn.ensemble import HistGradientBoostingClassifier
     from sklearn.linear_model import LogisticRegression
@@ -111,6 +155,7 @@ def leave_one_aoi_out(data: list[AoiData], n_train: int = 200_000, seed: int = 0
         rule_a = {**metrics(vv <= RULE_A_DB, test.y), **threshold_free(-vv, test.y)}
         rule_a["best_cut"] = -rule_a["best_cut"]   # score was -VV; report the cut as VV dB
         fold["rule_A"] = rule_a
+        fold["fewshot"] = {"vv": fewshot_iou(vv, test.y, rng)}
         for balanced in (False, True):
             parts = [sample_pure(d, n_train, rng, balanced) for d in train]
             Xtr = np.concatenate([p[0] for p in parts])
@@ -128,5 +173,6 @@ def leave_one_aoi_out(data: list[AoiData], n_train: int = 200_000, seed: int = 0
                     entry["std_coefficients"] = dict(zip(FEATURES, map(float, model[-1].coef_[0])))
                 entry["_prob"] = prob      # removed before JSON; used for maps
                 fold["models"][key] = entry
+                fold["fewshot"][key] = fewshot_iou(-prob, test.y, rng)
         results["folds"][test.name] = fold
     return results

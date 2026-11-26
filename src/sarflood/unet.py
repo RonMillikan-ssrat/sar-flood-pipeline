@@ -285,7 +285,7 @@ def leave_one_aoi_out_unet(grids: list[Grid], evals: list, cfg: TrainConfig,
     import torch
 
     from .features import FEATURES
-    from .pixels import RULE_A_DB, metrics, threshold_free
+    from .pixels import RULE_A_DB, fewshot_iou, metrics, threshold_free
 
     vv_col = FEATURES.index("vv")
     res = {"config": {k: v for k, v in dataclasses.asdict(cfg).items() if k != "log"},
@@ -306,6 +306,8 @@ def leave_one_aoi_out_unet(grids: list[Grid], evals: list, cfg: TrainConfig,
             "pos_weight": pos_weight, "norm": norm.to_dict(), "train_seconds": train_s,
             "epochs": fold_cfg.log, "rule_A": rule_a,
             "unet": {**metrics(prob >= 0.5, ev.y), **threshold_free(prob, ev.y)},
+            "fewshot": {"vv": fewshot_iou(vv, ev.y, np.random.default_rng(cfg.seed)),
+                        "unet": fewshot_iou(-prob, ev.y, np.random.default_rng(cfg.seed + 1))},
             "_prob_grid": prob_grid,
         }
         if save_dir is not None:
