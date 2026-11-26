@@ -25,10 +25,28 @@ terrain, a drift check flags it, and the model registry refuses to promote it.
 | Labels: EMS delineation (flood fraction via sub-pixel rasterization, AOI, not-analysed, permanent water) on the change grid; IoU/F1/precision/recall; outcome map; threshold sweep incl. no-change rule; class-conditional distributions + best single cut per variable | `labels.py`, `sarflood evaluate` | **done** |
 | Fixed rules for held-out testing (presets A/B/C), incl. label-free Otsu baseline | `rules.py`, `evaluate --rule` | **built** |
 | AOI entries straight from EMS vector packages | `ems_zip.py`, `sarflood ems-aoi` | **built** |
-| Held-out test: EMSR629 Shikarpur (AOI02), Jacobabad (AOI03) | | todo |
-| Train U-Net | GEAP Pipelines (Kubeflow) | todo |
+| Held-out test: EMSR629 Shikarpur (AOI02), Jacobabad (AOI03) | `evaluate --rule` | **done** (table below) |
+| Pixel classifiers (logistic regression, gradient boosting), leave-one-AOI-out vs rule A | `features.py`, `pixels.py`, `sarflood train-pixels` | **built** |
+| Train U-Net (desktop GPU, WSL2) → GEAP Pipelines (Kubeflow) | | todo |
 | Track, register, gate, roll back | MLflow | todo |
 | Evaluate on holdout AOIs + drift checks | | todo |
+
+## Results so far
+
+Flood pass S1A 2022-08-30 01:25 UTC (track 78 descending), reference 2022-05-26,
+3x3 averaging, 20 m. Labels: Copernicus EMS EMSR629 delineations traced from
+SPOT-6/7 at 05:44-05:45 UTC the same day (independent sensor, ~4 h later).
+Rules were fixed on Larkana before scoring Shikarpur and Jacobabad. IoU:
+
+| Rule | Larkana (in-sample) | Shikarpur (held out) | Jacobabad (held out) |
+|---|---|---|---|
+| A: VV <= -12 dB | 0.778 | 0.730 | 0.691 |
+| B: dVV <= -1 dB and VV <= -12 dB | 0.738 | 0.662 | 0.693 |
+| C: Otsu on VV (no labels) | 0.702 | 0.547 | 0.598 |
+
+A single threshold errs in opposite directions on the two held-out areas
+(Shikarpur P 0.95 / R 0.76: too strict; Jacobabad P 0.76 / R 0.88: too loose),
+which is what motivates learned, context-aware models.
 
 ## Areas of interest
 
@@ -57,6 +75,8 @@ src/sarflood/
   labels.py    EMS vector package -> label rasters on the change grid; scoring
   rules.py     classification rules (A/B/C presets, Otsu), fixed before held-out tests
   ems_zip.py   AOI outline + source records from an EMS package
+  features.py  per-pixel features (backscatter, change, ratios, 7x7 context)
+  pixels.py    leave-one-AOI-out training/scoring of pixel classifiers
 snap/graphs/  SNAP gpt graphs used as references
   cli.py       run the same logic without Airflow
 tests/      pytest, no network needed

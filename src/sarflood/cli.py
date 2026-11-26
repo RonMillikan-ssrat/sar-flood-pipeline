@@ -568,6 +568,67 @@ def cmd_ems_aoi(args) -> int:
     return 0
 
 
+def cmd_train_pixels(args) -> int:
+    import numpy as np
+
+    from .features import load_aoi
+    from .labels import confusion_quicklook
+    from .pixels import leave_one_aoi_out
+
+    if len(args.aoi) < 2:
+        print("need at least 2 AOIs for leave-one-out", file=sys.stderr)
+        return 2
+    data = []
+    for a in args.aoi:
+        pair = _load_pair(a, args.event, args.flood_pass)
+        if pair is None or pair["reference"] is None:
+            return 2
+        stem = _change_stem(pair, args.spacing, args.smooth)
+        ctif = data_root() / "change" / a / f"{stem}_change.tif"
+        labs = sorted((data_root() / "eval" / a).glob(f"{stem}_EMSR*_labels.tif"))
+        if not ctif.exists() or len(labs) != 1:
+            print(f"{a}: need {ctif.name} and exactly one labels file ({len(labs)} found); "
+                  f"run 'sarflood change' and 'sarflood evaluate' with --smooth {args.smooth}",
+                  file=sys.stderr)
+            return 2
+        d = load_aoi(a, ctif, labs[0])
+        print(f"{a:<10} {d.X.shape[0]:>10,} scored px   flood share {d.y.mean():.3f}   "
+              f"labels {labs[0].name[len(stem) + 1:]}")
+        data.append(d)
+
+    res = leave_one_aoi_out(data, n_train=args.samples, seed=args.seed,
+                            importance=not args.no_importance)
+    out_dir = data_root() / "ml" / "pixels"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tag = f"{args.flood_pass}_s{args.smooth}"
+    print(f"\nleave-one-AOI-out (train: pure-pixel sample, {args.samples:,}/AOI; "
+          f"test: all scored px of the held-out AOI; cut 0.5)")
+    print(f"  {'held out':<10} {'model':<8} {'IoU':>6} {'F1':>6} {'P':>6} {'R':>6}")
+    for test in data:
+        fold = res["folds"][test.name]
+        rows = [("rule A", fold["rule_A"])] + [(m, e["metrics"]) for m, e in fold["models"].items()]
+        for m, s in rows:
+            print(f"  {test.name:<10} {m:<8} {s['iou']:6.3f} {s['f1']:6.3f} "
+                  f"{s['precision']:6.3f} {s['recall']:6.3f}")
+        for m, e in fold["models"].items():
+            prob = e.pop("_prob")
+            if m == "hgb":
+                grid = np.zeros(test.shape[0] * test.shape[1], bool)
+                grid[test.idx] = prob >= 0.5
+                confusion_quicklook(grid.reshape(test.shape), test.labels, test.valid,
+                                    out_dir / f"{tag}_{test.name}_hgb_confusion.png",
+                                    title=f"{test.name} held out: gradient boosting "
+                                          f"(trained on {', '.join(fold['train_aois'])})")
+        imp = fold["models"].get("hgb", {}).get("perm_importance_iou")
+        if imp:
+            top = sorted(imp.items(), key=lambda kv: -kv[1])[:5]
+            print(f"  {'':<10} hgb top features (IoU drop when shuffled): "
+                  + ", ".join(f"{k} {v:+.3f}" for k, v in top))
+    out = write_json(out_dir / f"{tag}_loao.json", res)
+    print(f"-> {out}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="sarflood")
     p.add_argument("--config", default=None, help="path to aois.yaml")
@@ -685,6 +746,17 @@ def main(argv: list[str] | None = None) -> int:
     ea.add_argument("--margin", type=float, default=0.01, help="degrees added around the EMS AOI")
     ea.add_argument("--append", action="store_true", help="append to the config (else just print)")
     ea.set_defaults(func=cmd_ems_aoi)
+
+    tp = sub.add_parser("train-pixels", help="leave-one-AOI-out pixel classifiers vs rule A")
+    tp.add_argument("--aoi", action="append", required=True, help="repeat; >= 2 AOIs")
+    tp.add_argument("--event", required=True)
+    tp.add_argument("--flood-pass", required=True)
+    tp.add_argument("--smooth", type=int, default=3)
+    tp.add_argument("--spacing", type=float, default=20.0)
+    tp.add_argument("--samples", type=int, default=200_000, help="training pixels per AOI")
+    tp.add_argument("--seed", type=int, default=0)
+    tp.add_argument("--no-importance", action="store_true", help="skip permutation importance")
+    tp.set_defaults(func=cmd_train_pixels)
 
     args = p.parse_args(argv)
     if args.config is None:
