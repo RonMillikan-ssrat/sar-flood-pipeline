@@ -27,7 +27,8 @@ terrain, a drift check flags it, and the model registry refuses to promote it.
 | AOI entries straight from EMS vector packages | `ems_zip.py`, `sarflood ems-aoi` | **built** |
 | Held-out test: EMSR629 Shikarpur (AOI02), Jacobabad (AOI03) | `evaluate --rule` | **done** (table below) |
 | Pixel classifiers (logistic regression, gradient boosting), leave-one-AOI-out vs rule A | `features.py`, `pixels.py`, `sarflood train-pixels` | **built** |
-| Train U-Net (desktop GPU, WSL2) → GEAP Pipelines (Kubeflow) | | todo |
+| U-Net (plain PyTorch, ~7.8M params), leave-one-AOI-out vs rule A; fp16 on CUDA | `unet.py`, `sarflood train-unet` | **built** |
+| GEAP Pipelines (Kubeflow) training | | todo |
 | Track, register, gate, roll back | MLflow | todo |
 | Evaluate on holdout AOIs + drift checks | | todo |
 
@@ -47,6 +48,13 @@ Rules were fixed on Larkana before scoring Shikarpur and Jacobabad. IoU:
 A single threshold errs in opposite directions on the two held-out areas
 (Shikarpur P 0.95 / R 0.76: too strict; Jacobabad P 0.76 / R 0.88: too loose),
 which is what motivates learned, context-aware models.
+
+Pixel classifiers (11 features incl. 7x7 context), leave-one-AOI-out: IoU
+0.787 / 0.695 / 0.669 vs rule A 0.778 / 0.730 / 0.691. Threshold-free, they rank
+only slightly better than VV (AUC +0.005 to +0.013); the ideal VV cut varies
+~3 dB between AOIs (-11.3 / -9.7 / -12.6 dB). Label-free adaptive cuts (Otsu,
+2-component GMM) land 2.5-5 dB stricter than the ideal: they find open water,
+while EMS "flooded area" also includes brighter flooded ground.
 
 ## Areas of interest
 
@@ -77,6 +85,7 @@ src/sarflood/
   ems_zip.py   AOI outline + source records from an EMS package
   features.py  per-pixel features (backscatter, change, ratios, 7x7 context)
   pixels.py    leave-one-AOI-out training/scoring of pixel classifiers
+  unet.py      U-Net: tiles, masked class-balanced loss, overlapping-tile prediction
 snap/graphs/  SNAP gpt graphs used as references
   cli.py       run the same logic without Airflow
 tests/      pytest, no network needed

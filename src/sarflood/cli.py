@@ -638,6 +638,79 @@ def cmd_train_pixels(args) -> int:
     return 0
 
 
+def cmd_train_unet(args) -> int:
+    import numpy as np
+    import rasterio
+
+    from .features import load_aoi
+    from .labels import confusion_quicklook
+    from .unet import TrainConfig, leave_one_aoi_out_unet, load_grid
+
+    if len(args.aoi) < 2:
+        print("need at least 2 AOIs for leave-one-out", file=sys.stderr)
+        return 2
+    grids, evals, ctifs = [], [], []
+    for a in args.aoi:
+        pair = _load_pair(a, args.event, args.flood_pass)
+        if pair is None or pair["reference"] is None:
+            return 2
+        stem = _change_stem(pair, args.spacing, args.smooth)
+        ctif = data_root() / "change" / a / f"{stem}_change.tif"
+        labs = sorted((data_root() / "eval" / a).glob(f"{stem}_EMSR*_labels.tif"))
+        if not ctif.exists() or len(labs) != 1:
+            print(f"{a}: need {ctif.name} and exactly one labels file; run 'change' and "
+                  f"'evaluate' with --smooth {args.smooth}", file=sys.stderr)
+            return 2
+        g = load_grid(a, ctif, labs[0])
+        ev = load_aoi(a, ctif, labs[0])
+        print(f"{a:<10} grid {g.target.shape[0]}x{g.target.shape[1]}   loss px "
+              f"{int(g.loss_mask.sum()):,}   scored px {ev.idx.size:,}")
+        grids.append(g)
+        evals.append(ev)
+        ctifs.append(ctif)
+
+    cfg = TrainConfig(tile=args.tile, batch=args.batch, epochs=args.epochs,
+                      tiles_per_epoch=args.tiles_per_epoch, lr=args.lr, base=args.base,
+                      seed=args.seed, device=args.device)
+    out_dir = data_root() / "ml" / "unet"
+    tag = f"{args.flood_pass}_s{args.smooth}_b{args.base}_e{args.epochs}"
+    res = leave_one_aoi_out_unet(grids, evals, cfg, save_dir=out_dir / f"{tag}_models")
+
+    print(f"\nU-Net leave-one-AOI-out ({args.epochs} epochs x {args.tiles_per_epoch} tiles "
+          f"of {args.tile}px, base {args.base}); best-IoU picks the cut with test labels "
+          f"(a ceiling, not a result)")
+    print(f"  {'held out':<10} {'model':<7} {'IoU@.5':>7} {'P':>6} {'R':>6} {'AUC':>6} "
+          f"{'AP':>6} {'bestIoU':>8} {'cut':>8}")
+    for (g, ctif) in zip(grids, ctifs):
+        f = res["folds"][g.name]
+        for name, s, cut in [("rule A", f["rule_A"], f"{f['rule_A']['best_cut']:.1f}dB"),
+                             ("unet", f["unet"], f"{f['unet']['best_cut']:.2f}")]:
+            print(f"  {g.name:<10} {name:<7} {s['iou']:7.3f} {s['precision']:6.3f} "
+                  f"{s['recall']:6.3f} {s['auc']:6.3f} {s['ap']:6.3f} {s['best_iou']:8.3f} "
+                  f"{cut:>8}")
+        ep = f["epochs"]
+        print(f"  {'':<10} params {f['params']:,}  train {f['train_seconds']:.0f}s  "
+              f"loss {ep[0]['loss']:.3f} -> {ep[-1]['loss']:.3f}")
+        prob = f.pop("_prob_grid")
+        with rasterio.open(ctif) as src:
+            prof = src.profile
+        prof.update(count=1, dtype="float32", nodata=None, tiled=True, blockxsize=256,
+                    blockysize=256, compress="deflate")
+        ptif = out_dir / f"{tag}_{g.name}_prob.tif"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        with rasterio.open(ptif, "w", **prof) as dst:
+            dst.write(prob.astype(np.float32), 1)
+            dst.set_band_description(1, "flood_probability")
+        ev = evals[[e.name for e in evals].index(g.name)]
+        confusion_quicklook(prob >= 0.5, ev.labels, ev.valid,
+                            out_dir / f"{tag}_{g.name}_confusion.png",
+                            title=f"{g.name} held out: U-Net (trained on "
+                                  f"{', '.join(f['train_aois'])})")
+    out = write_json(out_dir / f"{tag}_loao.json", res)
+    print(f"-> {out}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="sarflood")
     p.add_argument("--config", default=None, help="path to aois.yaml")
@@ -766,6 +839,22 @@ def main(argv: list[str] | None = None) -> int:
     tp.add_argument("--seed", type=int, default=0)
     tp.add_argument("--no-importance", action="store_true", help="skip permutation importance")
     tp.set_defaults(func=cmd_train_pixels)
+
+    tu = sub.add_parser("train-unet", help="leave-one-AOI-out U-Net vs rule A (GPU if available)")
+    tu.add_argument("--aoi", action="append", required=True, help="repeat; >= 2 AOIs")
+    tu.add_argument("--event", required=True)
+    tu.add_argument("--flood-pass", required=True)
+    tu.add_argument("--smooth", type=int, default=3)
+    tu.add_argument("--spacing", type=float, default=20.0)
+    tu.add_argument("--tile", type=int, default=256)
+    tu.add_argument("--batch", type=int, default=16)
+    tu.add_argument("--epochs", type=int, default=20)
+    tu.add_argument("--tiles-per-epoch", type=int, default=400)
+    tu.add_argument("--lr", type=float, default=1e-3)
+    tu.add_argument("--base", type=int, default=32, help="channels at the top level (32 -> ~7.8M params)")
+    tu.add_argument("--seed", type=int, default=0)
+    tu.add_argument("--device", default="auto", help="auto, cuda or cpu")
+    tu.set_defaults(func=cmd_train_unet)
 
     args = p.parse_args(argv)
     if args.config is None:
