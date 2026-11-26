@@ -108,7 +108,9 @@ def leave_one_aoi_out(data: list[AoiData], n_train: int = 200_000, seed: int = 0
         fold = {"train_aois": [d.name for d in train],
                 "test_flood_share": float(test.y.mean()), "models": {}}
         vv = test.X[:, vv_col]
-        fold["rule_A"] = {**metrics(vv <= RULE_A_DB, test.y), **threshold_free(-vv, test.y)}
+        rule_a = {**metrics(vv <= RULE_A_DB, test.y), **threshold_free(-vv, test.y)}
+        rule_a["best_cut"] = -rule_a["best_cut"]   # score was -VV; report the cut as VV dB
+        fold["rule_A"] = rule_a
         for balanced in (False, True):
             parts = [sample_pure(d, n_train, rng, balanced) for d in train]
             Xtr = np.concatenate([p[0] for p in parts])

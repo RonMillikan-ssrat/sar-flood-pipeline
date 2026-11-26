@@ -4,7 +4,7 @@ import zipfile
 import numpy as np
 import pytest
 
-from sarflood.rules import PRESETS, apply_rule, otsu_threshold, parse_rule
+from sarflood.rules import PRESETS, apply_rule, gmm_threshold, otsu_threshold, parse_rule
 
 
 def test_otsu_bimodal():
@@ -139,3 +139,23 @@ def test_flood_source_via_dmg_src_id_not_eventphase(tmp_path):
         zf.writestr("EMSR629_AOI03_DEL_PRODUCT_observedEventA_r1_v1.dbf", obs)
     info = aoi_from_zip(z)
     assert [r["source_nam"] for r in info["flood_sources"]] == ["SPOT-6-7"]
+
+
+def test_gmm_symmetric_and_unequal_weights():
+    rng = np.random.default_rng(1)
+    sym = np.concatenate([rng.normal(-20, 2, 50_000), rng.normal(-10, 2, 50_000)])
+    assert gmm_threshold(sym) == pytest.approx(-15, abs=0.3)      # equal classes: midpoint
+    # A small dark class: the Bayes boundary moves toward it (prior favours the big class).
+    skew = np.concatenate([rng.normal(-20, 2, 10_000), rng.normal(-10, 2, 90_000)])
+    assert -18.5 < gmm_threshold(skew) < -15.0
+
+
+def test_gmm_rule_parses_and_resolves():
+    r = parse_rule("D")
+    assert r.conditions[0].gmm and not r.conditions[0].otsu
+    rng = np.random.default_rng(2)
+    fvv = np.concatenate([rng.normal(-21, 1.5, 3000), rng.normal(-9, 1.5, 3000)]).reshape(1, -1)
+    bands = {"flood_vv_db": fvv, "dvv_db": fvv * 0, "flood_vh_db": fvv - 7, "dvh_db": fvv * 0}
+    pred = apply_rule(r, bands, np.ones_like(fvv, bool))
+    assert -17 < r.conditions[0].threshold < -13 and "(gmm)" in r.describe()
+    assert pred[0, :3000].mean() > 0.97 and pred[0, 3000:].mean() < 0.03

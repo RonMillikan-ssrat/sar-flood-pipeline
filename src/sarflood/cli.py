@@ -510,7 +510,7 @@ def cmd_evaluate(args) -> int:
         from .rules import apply_rule, parse_rule
 
         results["rules"] = {}
-        print("rules (fixed in advance; otsu thresholds come from the change map, not labels):")
+        print("rules (fixed in advance; otsu/gmm thresholds come from the change map, not labels):")
         for spec in args.rule:
             rule = parse_rule(spec)
             pred = apply_rule(rule, hist_bands, valid, valid_vh)
@@ -744,7 +744,7 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("--hist", action="store_true",
                     help="class-conditional distributions (EMS flood vs dry) + best single cuts")
     ev.add_argument("--rule", action="append", default=[],
-                    help="rule to score, repeatable: preset A/B/C or e.g. 'dvv<=-1,vv<=-12', 'vv<=otsu'")
+                    help="rule to score, repeatable: preset A-D or e.g. 'dvv<=-1,vv<=-12', 'vv<=otsu', 'vv<=gmm'")
     ev.set_defaults(func=cmd_evaluate)
 
     ea = sub.add_parser("ems-aoi", help="make an AOI config entry from an EMS vector package")

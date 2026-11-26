@@ -88,6 +88,7 @@ def test_loao_model_beats_rule_a_on_flooded_vegetation(tmp_path):
         assert fold["models"]["hgb_bal"]["train_flood_share"] == pytest.approx(0.5, abs=0.01)
         assert fold["models"]["hgb"]["auc"] > a["auc"]        # VH - VV ranks the vegetation
         assert 0 <= a["best_iou"] <= 1 and np.isfinite(a["best_cut"])
+        assert a["best_cut"] < 0          # reported as a VV threshold in dB
         # Rule A misses the bright flooded vegetation; the model catches it from VH - VV.
         assert a["recall"] < 0.7, name
         assert hgb["iou"] > 0.95 and hgb["iou"] > a["iou"] + 0.2, name
