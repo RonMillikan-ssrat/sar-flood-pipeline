@@ -129,6 +129,9 @@ def test_promote_refuses_across_labels_versions(store, tmp_path):
     tracking.promote(v1)
     with pytest.raises(ValueError, match="labels_version differs"):
         tracking.promote(v2)                                   # better gate, other labels
+    from sarflood import cli
+
+    assert cli.main(["registry", "promote", "--version", str(v2)]) == 2   # fails, not skip
     assert tracking.promote(v2, force=True).startswith("PROMOTED")
     rows = {r["version"]: r for r in tracking.registry_table()}
     assert (rows[1]["labels_version"], rows[2]["labels_version"]) == ("1", "2")
@@ -149,7 +152,12 @@ def test_holdout_scoring_and_logging(store, tmp_path):
     assert res["flood_share"] == pytest.approx(test.y.mean())
     assert res["model"]["auc"] > 0.95 and res["rule_A"]["best_cut"] < 0   # cut in VV dB
     assert res["model"]["iou"] > res["flood_share"]                     # skill over all-flood
+    res.update(flood_pass="P1", labels_version="3")
     run = tracking.log_holdout("c", v, tags, res, {"event": "e"})
     r = mlflow.get_run(run)
-    assert r.data.tags["model_version"] == str(v)
+    assert r.data.tags["model_version"] == str(v) and r.data.tags["labels_version"] == "3"
     assert r.data.metrics["model.auc"] == pytest.approx(res["model"]["auc"])
+    assert tracking.log_holdout("c", v, tags, res, {}) is None          # same key: skipped
+    assert tracking.log_holdout("c", v, tags, res, {}, force=True) is not None
+    res["labels_version"] = "3-rb60"
+    assert tracking.log_holdout("c", v, tags, res, {}) is not None      # new labels: logged

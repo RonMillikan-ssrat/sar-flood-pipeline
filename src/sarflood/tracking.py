@@ -321,10 +321,20 @@ def holdout_metrics(prob, y, vv, seed: int = 0) -> dict:
             "model": model, "rule_A": rule}
 
 
-def log_holdout(aoi: str, version: int, tags: dict, result: dict, run_tags: dict) -> str:
+def log_holdout(aoi: str, version: int, tags: dict, result: dict, run_tags: dict,
+                force: bool = False) -> str | None:
+    """Log one holdout score. A run with the same AOI, flood pass, model version and
+    labels version already logged is not logged again (returns None) unless force."""
     mlflow = setup(HOLDOUT_EXPERIMENT)
+    key = {"aoi": aoi, "flood_pass": str(result.get("flood_pass", "")),
+           "model_version": str(version), "labels_version": str(result.get("labels_version", "1"))}
+    if not force:
+        filt = " and ".join(f"tags.{k} = '{v}'" for k, v in key.items())
+        if mlflow.search_runs(experiment_names=[HOLDOUT_EXPERIMENT], filter_string=filt,
+                              output_format="list", max_results=1):
+            return None
     with mlflow.start_run(run_name=f"v{version}:{aoi}") as run:
-        mlflow.set_tags({"aoi": aoi, "model_version": str(version),
+        mlflow.set_tags({**key,
                          "model_method": tags.get("method", "?"),
                          "model_labels_version": tags.get("labels_version", "1"), **run_tags})
         mlflow.log_metrics({"flood_share": result["flood_share"],
