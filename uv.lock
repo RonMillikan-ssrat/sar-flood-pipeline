@@ -3283,6 +3283,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+databricks = [
+    { name = "databricks-sdk" },
+]
 dev = [
     { name = "pytest" },
     { name = "ruff" },
@@ -3296,6 +3299,7 @@ unet = [
 
 [package.metadata]
 requires-dist = [
+    { name = "databricks-sdk", marker = "extra == 'databricks'", specifier = ">=0.171.0" },
     { name = "matplotlib", specifier = ">=3.8" },
     { name = "mlflow", marker = "extra == 'tracking'", specifier = ">=3.0" },
     { name = "numpy", specifier = ">=1.26" },
@@ -3309,7 +3313,7 @@ requires-dist = [
     { name = "shapely", specifier = ">=2.0" },
     { name = "torch", marker = "extra == 'unet'", specifier = ">=2.2" },
 ]
-provides-extras = ["dev", "unet", "tracking"]
+provides-extras = ["dev", "unet", "tracking", "databricks"]
 
 [[package]]
 name = "scikit-learn"

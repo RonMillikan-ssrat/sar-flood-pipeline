@@ -23,6 +23,9 @@ dependencies = [
 dev = ["pytest>=8", "ruff>=0.6"]
 unet = ["torch>=2.2"]
 tracking = ["mlflow>=3.0"]   # install the CUDA build that matches your GPU/driver
+databricks = [
+    "databricks-sdk>=0.171.0",
+]
 # Airflow is installed separately with its constraints file; see README.
 
 [project.scripts]

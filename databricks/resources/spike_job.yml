@@ -1,0 +1,14 @@
+# Phase 0 spike as a job. No compute block: on Free Edition, jobs run on serverless.
+# Running the notebook interactively works too; the job form proves the bundle path.
+resources:
+  jobs:
+    sarflood_phase0_spike:
+      name: sarflood-phase0-spike
+      tasks:
+        - task_key: spike
+          notebook_task:
+            notebook_path: ../notebooks/00_spike.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              volume: ${var.volume}

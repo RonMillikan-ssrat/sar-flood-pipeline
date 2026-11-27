@@ -1,0 +1,36 @@
+# Databricks Asset Bundle for sar-flood-pipeline's lakehouse layer.
+#
+# The bundle root is this databricks/ folder: only its contents sync to the
+# workspace. The sarflood package itself goes up as a wheel
+# (scripts/upload_to_volume.py --wheel ...), so jobs run the same code as Ubuntu.
+#
+#   databricks bundle validate              # check config
+#   databricks bundle deploy                # sync notebooks, create/update jobs
+#   databricks bundle run sarflood_phase0_spike
+#
+# Auth: `databricks auth login --host https://<your-workspace>.cloud.databricks.com`
+# creates a profile; add `-p <profile>` to the commands if it isn't DEFAULT.
+
+bundle:
+  name: sarflood
+
+include:
+  - resources/*.yml
+
+variables:
+  catalog:
+    description: Unity Catalog catalog (must exist; Free Edition creates one for you)
+    default: workspace
+  schema:
+    description: schema for bronze/silver/gold tables, the volume, and models
+    default: sarflood
+  volume:
+    description: managed volume that upload_to_volume.py writes to
+    default: raw
+
+targets:
+  dev:
+    mode: development      # prefixes job names with [dev <user>], pauses schedules
+    default: true
+    # workspace:
+    #   host: https://<your-workspace>.cloud.databricks.com
