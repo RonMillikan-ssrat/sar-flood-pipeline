@@ -183,3 +183,15 @@ def test_fewshot_approaches_ceiling():
     assert fs["1000"]["mean"] > ceil - 0.01
     assert fs["25"]["mean"] <= fs["1000"]["mean"] + 1e-9
     assert fs["25"]["p10"] <= fs["25"]["mean"] <= fs["25"]["p90"]
+
+
+def test_importance_does_not_change_training(tmp_path):
+    """Permutation importance has its own random stream: turning it on must not move
+    the training samples, so gate values don't depend on --no-importance."""
+    data = [make_aoi(tmp_path, n, s) for n, s in (("a", 1), ("b", 2))]
+    r1 = leave_one_aoi_out(data, n_train=3000, importance=True)
+    r2 = leave_one_aoi_out(data, n_train=3000, importance=False)
+    for aoi in ("a", "b"):
+        for k, e in r1["folds"][aoi]["models"].items():
+            assert e["metrics"]["iou"] == r2["folds"][aoi]["models"][k]["metrics"]["iou"]
+        assert r1["folds"][aoi]["fewshot"] == r2["folds"][aoi]["fewshot"]

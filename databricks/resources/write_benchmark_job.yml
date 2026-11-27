@@ -1,0 +1,34 @@
+# Silver write-path comparison on the largest AOI (Houston, 12.8M rows): the same
+# frame written into a scratch table with parquet-via-Volume, then with chunked
+# createDataFrame (arrow). Timings land in silver_loads (table = silver_bench).
+# Afterwards: DROP TABLE workspace.sarflood.silver_bench
+#
+#   databricks bundle run sarflood_write_benchmark
+resources:
+  jobs:
+    sarflood_write_benchmark:
+      name: sarflood-write-benchmark
+      tasks:
+        - task_key: parquet
+          notebook_task:
+            notebook_path: ../notebooks/02_silver.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              volume: ${var.volume}
+              aois: houston
+              table: silver_bench
+              force: "true"
+              write_method: parquet
+        - task_key: arrow
+          depends_on: [{task_key: parquet}]
+          notebook_task:
+            notebook_path: ../notebooks/02_silver.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              volume: ${var.volume}
+              aois: houston
+              table: silver_bench
+              force: "true"
+              write_method: arrow

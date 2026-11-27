@@ -10,7 +10,7 @@ $DATA_ROOT/mlflow/. Set MLFLOW_TRACKING_URI to use a server instead.
    report (same SHA-256) is skipped.
 
 2. fit_final(): train a pixel model on all AOIs, log it (mlflow.sklearn) and register
-   a version of REGISTERED_MODEL. Its gate metric (mean held-out IoU with ~300 local
+   a version of model_name(). Its gate metric (mean held-out IoU with ~300 local
    labels for the cut, from the LOAO report) is stored as a version tag.
 
 3. promote() / rollback(): alias 'champion' moves to a candidate only if the
@@ -22,6 +22,17 @@ $DATA_ROOT/mlflow/. Set MLFLOW_TRACKING_URI to use a server instead.
 
 4. score_holdout(): apply a registered version to an AOI it never saw and log
    AUC/AP/IoU (with the all-flood baseline) to the 'sarflood-holdout' experiment.
+
+Backends (env SARFLOOD_MLFLOW):
+    local (default)  SQLite + artifact folder under $DATA_ROOT/mlflow; experiments by
+                     bare name; model 'sarflood-pixel-flood' in the workspace registry.
+    databricks       tracking URI 'databricks', registry 'databricks-uc'. Databricks
+                     rejects bare experiment names and file:// artifact locations
+                     (Phase 0 spike), so experiments live under
+                     SARFLOOD_EXPERIMENT_PREFIX (e.g. /Users/<you>/) with the default
+                     artifact store, and the model is a Unity Catalog name
+                     (SARFLOOD_MODEL_NAME, default workspace.sarflood.pixel_flood).
+                     UC also requires a model signature, which fit_final always logs.
 """
 
 from __future__ import annotations
@@ -33,7 +44,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 EXPERIMENT = "sarflood-loao"
-REGISTERED_MODEL = "sarflood-pixel-flood"
+REGISTERED_MODEL = "sarflood-pixel-flood"          # local default; see model_name()
+UC_MODEL_DEFAULT = "workspace.sarflood.pixel_flood"
 GATE_METRIC = "mean.iou_n300"   # mean held-out IoU, cut chosen from 300 local labels
 HOLDOUT_EXPERIMENT = "sarflood-holdout"
 
@@ -50,6 +62,30 @@ def labels_version_of_report(report: Path) -> str:
     return combined_labels_version(lv.values()) if lv else "1"
 
 
+def backend() -> str:
+    b = os.environ.get("SARFLOOD_MLFLOW", "local").strip().lower()
+    if b not in ("local", "databricks"):
+        raise ValueError(f"SARFLOOD_MLFLOW must be 'local' or 'databricks', not {b!r}")
+    return b
+
+
+def experiment_name(name: str) -> str:
+    """Bare name locally; an absolute workspace path on Databricks."""
+    if backend() == "local":
+        return name
+    prefix = os.environ.get("SARFLOOD_EXPERIMENT_PREFIX", "").strip()
+    if not prefix.startswith("/"):
+        raise ValueError("SARFLOOD_EXPERIMENT_PREFIX must be an absolute workspace path such "
+                         "as /Users/<you>/ when SARFLOOD_MLFLOW=databricks")
+    return prefix.rstrip("/") + "/" + name
+
+
+def model_name() -> str:
+    if os.environ.get("SARFLOOD_MODEL_NAME"):
+        return os.environ["SARFLOOD_MODEL_NAME"]
+    return UC_MODEL_DEFAULT if backend() == "databricks" else REGISTERED_MODEL
+
+
 def mlflow_dir() -> Path:
     from .manifest import data_root
 
@@ -57,11 +93,17 @@ def mlflow_dir() -> Path:
 
 
 def setup(experiment: str = EXPERIMENT):
-    """Point MLflow at the local store (unless MLFLOW_TRACKING_URI is set) and make
-    sure the experiment exists with an explicit artifact location."""
+    """Point MLflow at the backend and select the experiment (created if missing).
+    Local: SQLite store (unless MLFLOW_TRACKING_URI is set) and an explicit artifact
+    location. Databricks: workspace tracking, Unity Catalog registry, default artifacts."""
     import mlflow
 
     os.environ.setdefault("MLFLOW_DISABLE_AGENT_HINT", "1")
+    if backend() == "databricks":
+        mlflow.set_tracking_uri("databricks")
+        mlflow.set_registry_uri("databricks-uc")
+        mlflow.set_experiment(experiment_name(experiment))
+        return mlflow
     d = mlflow_dir()
     d.mkdir(parents=True, exist_ok=True)
     if not os.environ.get("MLFLOW_TRACKING_URI"):
@@ -206,9 +248,12 @@ def fit_final(data: list, method: str, n_train: int, seed: int, gate_value: floa
                            "train_flood_share": round(float(y.mean()), 4)})
         mlflow.log_metric("gate." + GATE_METRIC, gate_value)
         mlflow.set_tag("skops_trusted_types", ",".join(trusted))
+        from mlflow.models import infer_signature
+
+        sig = infer_signature(X[:100], model.predict_proba(X[:100])[:, 1])
         info = mlflow.sklearn.log_model(model, name="model", input_example=X[:5],
-                                        skops_trusted_types=trusted)
-    mv = mlflow.register_model(info.model_uri, REGISTERED_MODEL, tags={
+                                        signature=sig, skops_trusted_types=trusted)
+    mv = mlflow.register_model(info.model_uri, model_name(), tags={
         "method": method, "gate_metric": GATE_METRIC, "gate_value": f"{gate_value:.6f}",
         "gate_source": gate_source, "features": ",".join(FEATURES),
         "train_aois": ",".join(d.name for d in data),
@@ -228,7 +273,7 @@ def _alias_version(client, alias: str) -> int | None:
     from mlflow.exceptions import MlflowException
 
     try:
-        return int(client.get_model_version_by_alias(REGISTERED_MODEL, alias).version)
+        return int(client.get_model_version_by_alias(model_name(), alias).version)
     except MlflowException:
         return None
 
@@ -237,7 +282,7 @@ def registry_table() -> list[dict]:
     client = _client()
     champ, prev = _alias_version(client, "champion"), _alias_version(client, "previous")
     rows = []
-    for mv in client.search_model_versions(f"name = '{REGISTERED_MODEL}'"):
+    for mv in client.search_model_versions(f"name = '{model_name()}'"):
         v = int(mv.version)
         rows.append({"version": v, "method": mv.tags.get("method"),
                      "gate_value": mv.tags.get("gate_value"),
@@ -250,12 +295,12 @@ def registry_table() -> list[dict]:
 
 def promote(version: int, min_delta: float = 0.0, force: bool = False) -> str:
     client = _client()
-    cand = client.get_model_version(REGISTERED_MODEL, str(version))
+    cand = client.get_model_version(model_name(), str(version))
     champ_v = _alias_version(client, "champion")
     if champ_v == version:
         return f"version {version} is already champion"
     if champ_v is not None and not force:
-        champ = client.get_model_version(REGISTERED_MODEL, str(champ_v))
+        champ = client.get_model_version(model_name(), str(champ_v))
         if cand.tags.get("gate_metric") != champ.tags.get("gate_metric"):
             raise ValueError("gate metrics differ between candidate and champion; use --force")
         lc, lch = cand.tags.get("labels_version", "1"), champ.tags.get("labels_version", "1")
@@ -269,9 +314,9 @@ def promote(version: int, min_delta: float = 0.0, force: bool = False) -> str:
             return (f"REJECTED: v{version} {GATE_METRIC}={c:.4f} does not beat champion "
                     f"v{champ_v} ({ch:.4f}) by >= {min_delta}")
     if champ_v is not None:
-        client.set_registered_model_alias(REGISTERED_MODEL, "previous", str(champ_v))
-    client.set_registered_model_alias(REGISTERED_MODEL, "champion", str(version))
-    client.set_model_version_tag(REGISTERED_MODEL, str(version), "promoted_at",
+        client.set_registered_model_alias(model_name(), "previous", str(champ_v))
+    client.set_registered_model_alias(model_name(), "champion", str(version))
+    client.set_model_version_tag(model_name(), str(version), "promoted_at",
                                  datetime.now(UTC).isoformat(timespec="seconds"))
     return f"PROMOTED: v{version} is champion" + (f" (v{champ_v} -> previous)" if champ_v else "")
 
@@ -281,10 +326,10 @@ def rollback() -> str:
     champ_v, prev_v = _alias_version(client, "champion"), _alias_version(client, "previous")
     if prev_v is None:
         return "nothing to roll back to (no 'previous' alias)"
-    client.set_registered_model_alias(REGISTERED_MODEL, "champion", str(prev_v))
+    client.set_registered_model_alias(model_name(), "champion", str(prev_v))
     if champ_v is not None:
-        client.set_registered_model_alias(REGISTERED_MODEL, "previous", str(champ_v))
-        client.set_model_version_tag(REGISTERED_MODEL, str(champ_v), "rolled_back_at",
+        client.set_registered_model_alias(model_name(), "previous", str(champ_v))
+        client.set_model_version_tag(model_name(), str(champ_v), "rolled_back_at",
                                      datetime.now(UTC).isoformat(timespec="seconds"))
     return f"ROLLED BACK: v{prev_v} is champion again" + (f" (v{champ_v} -> previous)" if champ_v else "")
 
@@ -299,8 +344,8 @@ def load_version(version: int | None = None, alias: str = "champion"):
     v = version if version is not None else _alias_version(client, alias)
     if v is None:
         raise ValueError(f"no version holds alias {alias!r}")
-    mv = client.get_model_version(REGISTERED_MODEL, str(v))
-    model = mlflow.sklearn.load_model(f"models:/{REGISTERED_MODEL}/{v}")
+    mv = client.get_model_version(model_name(), str(v))
+    model = mlflow.sklearn.load_model(f"models:/{model_name()}/{v}")
     return model, int(v), dict(mv.tags)
 
 
@@ -330,7 +375,8 @@ def log_holdout(aoi: str, version: int, tags: dict, result: dict, run_tags: dict
            "model_version": str(version), "labels_version": str(result.get("labels_version", "1"))}
     if not force:
         filt = " and ".join(f"tags.{k} = '{v}'" for k, v in key.items())
-        if mlflow.search_runs(experiment_names=[HOLDOUT_EXPERIMENT], filter_string=filt,
+        if mlflow.search_runs(experiment_names=[experiment_name(HOLDOUT_EXPERIMENT)],
+                              filter_string=filt,
                               output_format="list", max_results=1):
             return None
     with mlflow.start_run(run_name=f"v{version}:{aoi}") as run:

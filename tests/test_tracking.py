@@ -161,3 +161,32 @@ def test_holdout_scoring_and_logging(store, tmp_path):
     assert tracking.log_holdout("c", v, tags, res, {}, force=True) is not None
     res["labels_version"] = "3-rb60"
     assert tracking.log_holdout("c", v, tags, res, {}) is not None      # new labels: logged
+
+
+def test_backend_names(monkeypatch):
+    monkeypatch.delenv("SARFLOOD_MLFLOW", raising=False)
+    monkeypatch.delenv("SARFLOOD_MODEL_NAME", raising=False)
+    assert tracking.experiment_name("sarflood-loao") == "sarflood-loao"
+    assert tracking.model_name() == "sarflood-pixel-flood"
+    monkeypatch.setenv("SARFLOOD_MLFLOW", "databricks")
+    monkeypatch.setenv("SARFLOOD_EXPERIMENT_PREFIX", "/Users/me@x.com/")
+    assert tracking.experiment_name("sarflood-loao") == "/Users/me@x.com/sarflood-loao"
+    assert tracking.model_name() == "workspace.sarflood.pixel_flood"
+    monkeypatch.setenv("SARFLOOD_MODEL_NAME", "cat.sch.m")
+    assert tracking.model_name() == "cat.sch.m"
+    monkeypatch.setenv("SARFLOOD_EXPERIMENT_PREFIX", "Users/me")
+    with pytest.raises(ValueError, match="absolute"):
+        tracking.experiment_name("x")
+    monkeypatch.setenv("SARFLOOD_MLFLOW", "dbx")
+    with pytest.raises(ValueError, match="local' or 'databricks"):
+        tracking.backend()
+
+
+def test_fit_final_logs_signature(store, tmp_path):
+    from mlflow.models import get_model_info
+
+    from tests.test_pixels import make_aoi
+
+    v, _ = tracking.fit_final([make_aoi(tmp_path, "a", 1)], "logreg", 1000, 0, 0.7, "r", {})
+    info = get_model_info(f"models:/{tracking.model_name()}/{v}")
+    assert info.signature is not None                  # Unity Catalog requires one

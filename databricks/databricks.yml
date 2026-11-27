@@ -27,6 +27,12 @@ variables:
   volume:
     description: managed volume that upload_to_volume.py writes to
     default: raw
+  train_aois:
+    description: AOIs the model is trained on (leave-one-AOI-out folds)
+    default: larkana,shikarpur,jacobabad
+  holdout_aois:
+    description: AOIs never used in training; scored after each registration
+    default: sanghar,khipro,houston
 
 targets:
   dev:

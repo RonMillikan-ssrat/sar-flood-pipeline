@@ -144,9 +144,10 @@ def permutation_importance_iou(model, X: np.ndarray, y: np.ndarray, rng: np.rand
 
 def leave_one_aoi_out(data: list[AoiData], n_train: int = 200_000, seed: int = 0,
                       importance: bool = True) -> dict:
-    rng = np.random.default_rng(seed)               # training samples, importance
+    rng = np.random.default_rng(seed)               # training samples only
     fs_rng = np.random.default_rng(seed + 10_000)   # few-label draws: separate stream, so
-    vv_col = FEATURES.index("vv")                   # adding them doesn't shift training
+    imp_rng = np.random.default_rng(seed + 20_000)  # adding them (or permutation
+    vv_col = FEATURES.index("vv")                   # importance) doesn't shift training
     results = {"features": FEATURES, "n_train_per_aoi": n_train, "folds": {}}
     for test in data:
         train = [d for d in data if d is not test]
@@ -169,7 +170,7 @@ def leave_one_aoi_out(data: list[AoiData], n_train: int = 200_000, seed: int = 0
                          "metrics": metrics(prob >= 0.5, test.y), **threshold_free(prob, test.y)}
                 if importance and name == "hgb":
                     entry["perm_importance_iou"] = permutation_importance_iou(
-                        model, test.X, test.y, rng)
+                        model, test.X, test.y, imp_rng)
                 if name == "logreg":
                     entry["std_coefficients"] = dict(zip(FEATURES, map(float, model[-1].coef_[0])))
                 entry["_prob"] = prob      # removed before JSON; used for maps
