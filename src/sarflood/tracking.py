@@ -282,8 +282,11 @@ def registry_table() -> list[dict]:
     client = _client()
     champ, prev = _alias_version(client, "champion"), _alias_version(client, "previous")
     rows = []
-    for mv in client.search_model_versions(f"name = '{model_name()}'"):
-        v = int(mv.version)
+    for hit in client.search_model_versions(f"name = '{model_name()}'"):
+        # Unity Catalog's search results carry no tags (ModelVersionSearch.tags is a
+        # method that raises); fetch each version, which works on both backends.
+        v = int(hit.version)
+        mv = client.get_model_version(model_name(), str(v))
         rows.append({"version": v, "method": mv.tags.get("method"),
                      "gate_value": mv.tags.get("gate_value"),
                      "labels_version": mv.tags.get("labels_version", "1"),

@@ -9,7 +9,15 @@ resources:
     sarflood_write_benchmark:
       name: sarflood-write-benchmark
       tasks:
+        - task_key: bronze          # silver reads bronze_pairs; make the job self-contained
+          notebook_task:
+            notebook_path: ../notebooks/01_bronze.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              volume: ${var.volume}
         - task_key: parquet
+          depends_on: [{task_key: bronze}]
           notebook_task:
             notebook_path: ../notebooks/02_silver.py
             base_parameters:

@@ -190,3 +190,24 @@ def test_fit_final_logs_signature(store, tmp_path):
     v, _ = tracking.fit_final([make_aoi(tmp_path, "a", 1)], "logreg", 1000, 0, 0.7, "r", {})
     info = get_model_info(f"models:/{tracking.model_name()}/{v}")
     assert info.signature is not None                  # Unity Catalog requires one
+
+
+def test_registry_table_with_uc_style_search_results(store, tmp_path, monkeypatch):
+    """UC returns ModelVersionSearch objects whose .tags raises; registry_table must
+    fetch each version instead of reading tags from the search results."""
+    from mlflow import MlflowClient
+    from mlflow.entities.model_registry.model_version_search import ModelVersionSearch
+
+    from tests.test_pixels import make_aoi
+
+    v, _ = tracking.fit_final([make_aoi(tmp_path, "a", 1)], "logreg", 1000, 0, 0.7, "r", {})
+    real = MlflowClient.search_model_versions
+
+    def uc_like(self, *a, **k):
+        return [ModelVersionSearch(name=m.name, version=m.version,
+                                   creation_timestamp=m.creation_timestamp)
+                for m in real(self, *a, **k)]
+
+    monkeypatch.setattr(MlflowClient, "search_model_versions", uc_like)
+    rows = tracking.registry_table()
+    assert rows[0]["version"] == v and rows[0]["method"] == "logreg"
