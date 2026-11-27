@@ -436,9 +436,9 @@ def cmd_evaluate(args) -> int:
 
     from .labels import (
         LABEL_BANDS,
-        LABELS_VERSION,
         class_histograms,
         confusion_quicklook,
+        labels_version,
         rasterize_ems,
         score,
         threshold_sweep,
@@ -472,8 +472,12 @@ def cmd_evaluate(args) -> int:
         transform, crs, shape = src.transform, src.crs, src.shape
     px_area = abs(transform.a * transform.e)
 
-    labels = rasterize_ems(z, shape, transform, crs, supersample=args.supersample)
+    labels = rasterize_ems(z, shape, transform, crs, supersample=args.supersample,
+                           river_buffer_m=args.river_buffer)
+    lv = labels_version(args.river_buffer)
     out_dir = data_root() / "eval" / args.aoi
+    if args.river_buffer != 30.0:   # sensitivity runs: own folder, so training still
+        out_dir = out_dir / f"rb{args.river_buffer:g}"   # finds exactly one labels file
     out_dir.mkdir(parents=True, exist_ok=True)
     lab_tif = out_dir / f"{stem}_{z.stem}_labels.tif"
     profile.update(count=len(LABEL_BANDS), dtype="float32", tiled=True,
@@ -482,7 +486,8 @@ def cmd_evaluate(args) -> int:
         for i, n in enumerate(LABEL_BANDS, 1):
             dst.write(labels[n].astype(np.float32), i)
             dst.set_band_description(i, n)
-        dst.update_tags(ems_zip=z.name, change=change_tif.name, labels_version=LABELS_VERSION)
+        dst.update_tags(ems_zip=z.name, change=change_tif.name, labels_version=lv,
+                        river_buffer_m=str(args.river_buffer))
 
     aoi_px = int(labels["aoi"].sum())
     print(f"labels -> {lab_tif}")
@@ -491,7 +496,8 @@ def cmd_evaluate(args) -> int:
           f"{int(labels['not_analysed'].sum()):,} px, permanent water {int(labels['perm_water'].sum()):,} px")
     base = score(np.ones(shape, bool), labels, valid, px_area)
     print(f"baseline: flood share of the scored region {base.flood_share:.3f} = IoU of an "
-          f"all-flood map; skill is IoU above this (labels v{LABELS_VERSION})")
+          f"all-flood map; skill is IoU above this (labels v{lv}, river buffer "
+          f"{args.river_buffer:g} m)")
     cd, wd = tags.get("change_db"), tags.get("water_db")
     results = {}
     for name, lo, hi in [("all", None, None), ("pure_only", 0.2, 0.8)]:
@@ -556,7 +562,8 @@ def cmd_evaluate(args) -> int:
                               title=f"{args.aoi}: threshold preview vs {z.stem}")
     out = write_json(out_dir / f"{stem}_{z.stem}_score.json",
                      {"change": change_tif.name, "ems_zip": z.name,
-                      "labels_version": LABELS_VERSION, "baseline": base.to_dict(), **results})
+                      "labels_version": lv, "river_buffer_m": args.river_buffer,
+                      "baseline": base.to_dict(), **results})
     print(f"-> {out}\n-> {png}")
     return 0
 
@@ -865,9 +872,11 @@ def cmd_score_holdout(args) -> int:
     out = write_json(out_dir / f"{args.aoi}_{args.flood_pass}_s{args.smooth}_v{v}.json", res)
     print(f"-> {out}")
     if not args.no_mlflow:
-        run = log_holdout(args.aoi, v, tags, res, {"flood_pass": args.flood_pass,
-                                                   "event": args.event, "source": args.source})
-        print(f"logged to MLflow experiment sarflood-holdout, run {run}")
+        run = log_holdout(args.aoi, v, tags, res, {"event": args.event, "source": args.source},
+                          force=args.force_log)
+        print(f"logged to MLflow experiment sarflood-holdout, run {run}" if run else
+              "already logged for this AOI / flood pass / model version / labels version "
+              "(use --force-log to log again)")
     return 0
 
 
@@ -889,7 +898,11 @@ def cmd_registry(args) -> int:
         if version is None:
             print("promote needs --version N or --latest (and a registered version)", file=sys.stderr)
             return 2
-        msg = promote(version, args.min_delta, args.force)
+        try:
+            msg = promote(version, args.min_delta, args.force)
+        except ValueError as e:     # not comparable: exit 2, so the Airflow task fails
+            print(f"REFUSED: {e}", file=sys.stderr)   # (exit 1 = rejection = skipped)
+            return 2
         print(msg)
         return 1 if msg.startswith("REJECTED") else 0
     else:
@@ -1004,6 +1017,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="class-conditional distributions (EMS flood vs dry) + best single cuts")
     ev.add_argument("--rule", action="append", default=[],
                     help="rule to score, repeatable: preset A-D or e.g. 'dvv<=-1,vv<=-12', 'vv<=otsu', 'vv<=gmm'")
+    ev.add_argument("--river-buffer", type=float, default=30.0,
+                    help="metres each side around EMS river/stream lines excluded from "
+                         "scoring like permanent water (default 30; 0 = labels v2 behaviour)")
     ev.set_defaults(func=cmd_evaluate)
 
     ea = sub.add_parser("ems-aoi", help="make an AOI config entry from an EMS vector package")
@@ -1071,6 +1087,7 @@ def main(argv: list[str] | None = None) -> int:
     sh.add_argument("--seed", type=int, default=0)
     sh.add_argument("--source", default="cli", help="MLflow tag, e.g. airflow")
     sh.add_argument("--no-mlflow", action="store_true")
+    sh.add_argument("--force-log", action="store_true", help="log even if already logged")
     sh.set_defaults(func=cmd_score_holdout)
 
     rg = sub.add_parser("registry", help="model registry: show, promote (gated), rollback")

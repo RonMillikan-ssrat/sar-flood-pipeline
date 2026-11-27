@@ -11,7 +11,11 @@ EMSR629 AOI01 DEL v2:
                      so it is NOT part of the permanent-water mask.
 
 Older (2017-era) shapefile-only packages are read by `ems_legacy`, which maps
-their layers onto the same four roles.
+their layers onto the same roles.
+
+    hydrographyL / hydrography_line   BH140 river, BH141 stream drawn as lines:
+                     buffered by RIVER_BUFFER_M each side and added to the
+                     permanent-water mask (labels version 3)
 
 Flood polygons are traced from 6 m optical imagery; our grid is 20 m. Each pixel's
 flood *fraction* is estimated by rasterizing on a finer grid (supersample x
@@ -40,7 +44,20 @@ PERMANENT_WATER = ("BH080", "BH130", "BH140", "BA040")  # lake, reservoir, river
 # a file without the tag is version 1.
 #   1  permanent water = BH080, BH140; 2022 GeoJSON packages only
 #   2  permanent water += BH130 reservoir, BA040 open water; 2017 shapefile packages
-LABELS_VERSION = "2"
+#   3  rivers/streams drawn as lines (BH140/BH141: hydrographyL, hydrography_line)
+#      buffered by RIVER_BUFFER_M each side and excluded like permanent water.
+#      EMS draws channels narrower than its mapping scale as lines, which have no
+#      area: a bank-full channel then counted as dry, so water there scored as a
+#      false alarm (Houston bayous). A non-default buffer gets its own version string.
+LABELS_VERSION = "3"
+RIVER_LINES = ("BH140", "BH141")       # river, stream
+RIVER_BUFFER_M = 30.0
+
+
+def labels_version(river_buffer_m: float = RIVER_BUFFER_M) -> str:
+    if river_buffer_m == RIVER_BUFFER_M:
+        return LABELS_VERSION
+    return f"{LABELS_VERSION}-rb{river_buffer_m:g}"
 LABEL_BANDS = ["flood_frac", "flood", "aoi", "not_analysed", "perm_water"]
 
 
@@ -74,37 +91,61 @@ def _burn(geoms: list[dict], shape: tuple[int, int], transform, supersample: int
     return fine.reshape(h, supersample, w, supersample).mean(axis=(1, 3)).astype(np.float32)
 
 
+def _is_river_line(code: str) -> bool:
+    return str(code).replace(" ", "").startswith(RIVER_LINES)
+
+
 def read_package(zip_path: Path) -> dict[str, list[dict]]:
-    """Flood, AOI, not-analysed and permanent-water features (EPSG:4326), either layout."""
+    """Flood, AOI, not-analysed, permanent-water and river-line features (EPSG:4326),
+    either package layout."""
     from . import ems_legacy
 
     with zipfile.ZipFile(zip_path) as zf:
         if ems_legacy.is_legacy(zf):
-            return ems_legacy.label_layers(zf, PERMANENT_WATER)
+            out = ems_legacy.label_layers(zf, PERMANENT_WATER)
+            out["river_lines"] = [f for f in ems_legacy.read_shapes(zf, "hydrography_line")
+                                  if _is_river_line(f["properties"].get("subtype", ""))]
+            return out
         flood = read_layer(zf, "observedEventA")
         aoi = read_layer(zf, "areaOfInterestA")
         foot = read_layer(zf, "imageFootprintA")
         hydro = read_layer(zf, "hydrographyA")
+        lines = read_layer(zf, "hydrographyL")
     if not flood and not aoi:
         raise ValueError(f"{Path(zip_path).name}: no observedEventA / areaOfInterestA layers "
                          "and not a recognised older package")
     return {"flood": flood, "aoi": aoi,
             "not_analysed": [f for f in foot if f["properties"].get("obj_type") == "Not Analysed"],
             "perm_water": [f for f in hydro
-                           if str(f["properties"].get("obj_type", "")).startswith(PERMANENT_WATER)]}
+                           if str(f["properties"].get("obj_type", "")).startswith(PERMANENT_WATER)],
+            "river_lines": [f for f in lines if _is_river_line(f["properties"].get("obj_type", ""))]}
+
+
+def _buffer(geoms: list[dict], dist_m: float) -> list[dict]:
+    """Buffer geometries already in a metric CRS (our grids are UTM)."""
+    from shapely.geometry import mapping, shape
+
+    return [mapping(shape(g).buffer(dist_m)) for g in geoms]
 
 
 def rasterize_ems(zip_path: Path, shape: tuple[int, int], transform, crs,
-                  supersample: int = 5) -> dict[str, np.ndarray]:
+                  supersample: int = 5,
+                  river_buffer_m: float = RIVER_BUFFER_M) -> dict[str, np.ndarray]:
+    """Label bands on the change grid. perm_water includes river/stream lines buffered
+    by river_buffer_m each side (0 = lines ignored, the version-2 behaviour)."""
     layers = read_package(zip_path)
     flood, aoi, na, perm = (layers[k] for k in ("flood", "aoi", "not_analysed", "perm_water"))
     frac = _burn(_to_crs(flood, crs), shape, transform, supersample)
+    perm_mask = _burn(_to_crs(perm, crs), shape, transform, supersample) >= 0.5
+    if river_buffer_m > 0 and layers.get("river_lines"):
+        rivers = _buffer(_to_crs(layers["river_lines"], crs), river_buffer_m)
+        perm_mask |= _burn(rivers, shape, transform, supersample) > 0   # any overlap: exclude
     return {
         "flood_frac": frac,
         "flood": (frac >= 0.5).astype(np.float32),
         "aoi": (_burn(_to_crs(aoi, crs), shape, transform, supersample) >= 0.5).astype(np.float32),
         "not_analysed": (_burn(_to_crs(na, crs), shape, transform, supersample) > 0).astype(np.float32),
-        "perm_water": (_burn(_to_crs(perm, crs), shape, transform, supersample) >= 0.5).astype(np.float32),
+        "perm_water": perm_mask.astype(np.float32),
     }
 
 

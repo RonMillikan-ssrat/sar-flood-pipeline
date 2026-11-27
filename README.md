@@ -31,7 +31,9 @@ terrain, a drift check flags it, and the model registry refuses to promote it.
 | GEAP Pipelines (Kubeflow) training | | todo |
 | Track (ingest LOAO reports), register final pixel model, gated promotion, rollback | `tracking.py`, `sarflood mlflow-log / fit-final / registry` (MLflow 3) | **built** |
 | Orchestration: per-event processing (mapped per AOI, SNAP pool of 1), train → log → register → gated promote, rollback | Airflow DAGs `sarflood_process_event`, `sarflood_train_and_register`, `sarflood_rollback_champion` | **built** |
-| Evaluate on holdout AOIs + drift checks | | todo |
+| Holdout AOIs never used in training (EMSR631 Sanghar/Khipro, EMSR229 Houston): champion vs rule A with all-flood baseline, AUC/AP; logged to MLflow | `sarflood score-holdout`, `ems_legacy.py` | **done** (table below) |
+| Label definition versioning; gate comparisons refused across versions | `labels.LABELS_VERSION`, `registry promote` | **built** |
+| Label-free drift checks (e.g. Bangladesh) | | todo |
 
 ## Results so far
 
@@ -63,6 +65,42 @@ random labeled pixels of the target area recovers nearly the ceiling everywhere;
 with that, hgb_bal reaches 0.783 / 0.815 / 0.699 (mean 0.766 vs 0.733 for rule A
 at -12 dB).
 
+### Holdout areas (domain shift)
+
+The champion (registry v1, `hgb_bal`, trained on Larkana, Shikarpur and Jacobabad
+from the 30 Aug 2022 track-78D pass) applied unchanged to areas, dates, tracks and a
+continent it never saw. Each label source is independent of Sentinel-1.
+
+| AOI | Shift | Labels (EMS) | Flood share = all-flood IoU | v1 IoU (gain) | rule A IoU (gain) | v1 AUC / AP | rule A AUC / AP |
+|---|---|---|---|---|---|---|---|
+| Khipro (EMSR631 AOI02) | new track 5D, +19 days | Sentinel-2, 20 Sep 2022 | 0.177 | **0.504** (+0.327) | 0.474 (+0.297) | **0.905 / 0.758** | 0.851 / 0.711 |
+| Sanghar (EMSR631 AOI01) | same track, +12 days | PlanetScope, 9 Sep 2022 (package metadata points to a 2021 image; see notes) | 0.722 | 0.342 (-0.380) | 0.378 (-0.344) | 0.812 / 0.924 | 0.776 / 0.909 |
+| Houston (EMSR229 AOI01) | new continent, urban, ascending track 34A | COSMO-SkyMed SAR, 28 Aug 2017 | 0.039 | 0.284 (+0.245) | 0.257 (+0.217) | 0.909 / 0.342 | 0.905 / **0.393** |
+
+Labels version 2 (see below); `gain` = IoU minus the IoU of a map that calls every
+pixel flood. What the holdouts show:
+
+* **Within the region the model generalizes.** On Khipro (new track, new date) it
+  beats rule A on every metric, and its fixed 0.5 cut lands within 0.003 of the
+  best possible cut.
+* **Label definitions matter more than the model.** Sanghar's EMS polygons are
+  field blocks of *flood-affected* land; only ~38% of the labelled flood is open
+  water. The land-like part is measurably changed (VH -2.5 dB, dVV -1.5 dB) but not
+  separable: no method, even with the cut tuned on these labels, beats the
+  all-flood map by more than 0.014.
+* **IoU needs a baseline.** With 72% flooded the trivial all-flood map scores 0.72;
+  with 3.9% (Houston) it scores 0.04. Scores are reported with that baseline, and
+  with AUC/AP, which depend on neither a cut nor the flood share.
+* **On a new continent the learned features stop helping.** On Houston the model's
+  ranking is no better than VV alone (AUC 0.909 vs 0.905) and worse where it matters
+  for a rare class (AP 0.342 vs 0.393). The false alarms are smooth surfaces (roads,
+  runways, bare and rice fields), which the change condition (rule B) partly
+  removes (precision 0.29 -> 0.40), and bank-full bayous that EMS drew as lines
+  with no area (fixed in labels version 3).
+* **Global automatic thresholds fail when water is rare.** With 3.9% water the VV
+  histogram has no water mode: Otsu and a 2-component GMM split two land classes at
+  -6 and -8 dB (IoU 0.05 / 0.07), while the fixed rule A cut transfers.
+
 ## Model registry (MLflow)
 
 ```bash
@@ -91,7 +129,14 @@ a high flood share inflates IoU: on Sanghar (72% flooded) the all-flood map scor
 and rule A 0.378. AUC and AP are reported because they depend on neither a cut nor the
 flood share.
 
-Each labels GeoTIFF carries a `labels_version` tag (`labels.LABELS_VERSION`; untagged = 1).
+Each labels GeoTIFF carries a `labels_version` tag (`labels.LABELS_VERSION`; untagged = 1):
+
+| Version | Change |
+|---|---|
+| 1 | permanent water = EMS BH080 lake, BH140 river polygons |
+| 2 | + BH130 reservoir, BA040 open water; 2017 shapefile-only packages (EMSR229) |
+| 3 | + river/stream lines (BH140/BH141) buffered 30 m each side, excluded like permanent water. `evaluate --river-buffer W` for a sensitivity run (version `3-rbW`, written to `eval/<aoi>/rbW/`) |
+
 Train-pixels reports and registered versions record it, `fit-final` refuses a report built
 on other labels than those on disk, and `registry promote` refuses to compare gate values
 across label versions; a person decides with `--force`.
@@ -101,7 +146,7 @@ across label versions; a person decides with `--force`.
 | DAG | Tasks | Notes |
 |---|---|---|
 | `sarflood_process_event` | `aoi_list` → per AOI (mapped): `pairs` → `download` → `orbits` → `terrain_correct` → `change` → `evaluate` | Network steps retry 3×. `terrain_correct` runs in pool `snap` (1 slot: one SNAP job at a time, it takes ~9 GB heap) with no retries and a 2 h timeout. Needs SNAP and CDSE credentials. |
-| `sarflood_train_and_register` | `train_pixels` → `mlflow_log` → `fit_final` → `promote` | A gate rejection shows as **skipped** `promote`, not failed: `registry promote` exits 1 on rejection, the task maps that to 99, and Airflow's bash tasks treat exit 99 as skip. |
+| `sarflood_train_and_register` | `train_pixels` → `mlflow_log` → `fit_final` → `promote` | A gate rejection shows as **skipped** `promote`, not failed: `registry promote` exits 1 on rejection, the task maps that to 99, and Airflow's bash tasks treat exit 99 as skip. If candidate and champion were gated on different label versions, `promote` exits 2 and the task **fails**: a person has to decide. |
 | `sarflood_rollback_champion` | `rollback` → `show` | Swaps `champion` and `previous` aliases. |
 
 All three are manual-trigger (`schedule=None`) and take run parameters

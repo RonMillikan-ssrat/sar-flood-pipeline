@@ -127,3 +127,61 @@ def test_source_warning_for_stale_dmg_source():
 def test_flood_frac_is_float_mask(tmp_path):
     lab = rasterize_ems(make_legacy_zip(tmp_path), (H, W), T, CRS)
     assert lab["flood_frac"].dtype == np.float32 and lab["flood_frac"].max() == pytest.approx(1.0)
+
+
+def _line_layer(zf, tag, feats, prefix="VECTOR/"):
+    """Polyline layer in WGS84; feats: [(utm (x, y) list, subtype)]."""
+    from rasterio.warp import transform
+
+    shp, shx, dbf = io.BytesIO(), io.BytesIO(), io.BytesIO()
+    w = shapefile.Writer(shp=shp, shx=shx, dbf=dbf, shapeType=shapefile.POLYLINE)
+    w.field("subtype", "C", 40)
+    for pts, sub in feats:
+        lon, lat = transform(CRS, "EPSG:4326", [p[0] for p in pts], [p[1] for p in pts])
+        w.line([list(zip(lon, lat))])
+        w.record(sub)
+    w.close()
+    base = prefix + STEM.format(tag)
+    for ext, b in ((".shp", shp), (".shx", shx), (".dbf", dbf)):
+        zf.writestr(base + ext, b.getvalue())
+    zf.writestr(base + ".prj", WGS84_PRJ)
+
+
+def test_river_lines_buffered_into_permanent_water(tmp_path):
+    from sarflood.labels import labels_version
+    from tests.test_labels import RES, X0, Y0
+
+    z = make_legacy_zip(tmp_path)
+    y = Y0 - 20.5 * RES                                  # horizontal line through row 20
+    with zipfile.ZipFile(z, "a") as zf:
+        _line_layer(zf, "hydrography_line", [
+            ([(X0 + 2 * RES, y), (X0 + 58 * RES, y)], "BH140 - River"),
+            ([(X0 + 2 * RES, Y0 - 2.5 * RES), (X0 + 58 * RES, Y0 - 2.5 * RES)], "BI020 - Dam"),
+        ])
+    base = rasterize_ems(z, (H, W), T, CRS, river_buffer_m=0)
+    lab = rasterize_ems(z, (H, W), T, CRS)                         # default 30 m
+    added = (lab["perm_water"] > 0) & (base["perm_water"] == 0)
+    rows = np.flatnonzero(added.any(axis=1))
+    assert set(rows) <= {18, 19, 20, 21, 22} and {19, 20, 21} <= set(rows)   # +-30 m = +-1.5 px
+    assert not added[2].any()                                       # dams are not water
+    assert labels_version(30.0) == "3" and labels_version(60.0) == "3-rb60"
+
+
+def test_2022_hydrographyL_streams_buffered(tmp_path):
+    import json
+
+    from tests.test_labels import RES, X0, Y0, make_zip
+
+    z = make_zip(tmp_path)
+    y = Y0 - 42.5 * RES
+    line = {"type": "LineString", "coordinates": [(X0 + 5 * RES, y), (X0 + 55 * RES, y)]}
+    from tests.test_labels import to_lonlat
+    with zipfile.ZipFile(z, "a") as zf:
+        zf.writestr("EMSR999_AOI01_DEL_PRODUCT_hydrographyL_r1_v1.json", json.dumps({
+            "type": "FeatureCollection", "features": [
+                {"type": "Feature", "properties": {"obj_type": "BH141-Stream"},
+                 "geometry": to_lonlat(line)}]}))
+    base = rasterize_ems(z, (H, W), T, CRS, river_buffer_m=0)
+    lab = rasterize_ems(z, (H, W), T, CRS)
+    assert lab["perm_water"].sum() > base["perm_water"].sum()
+    assert lab["perm_water"][42, 10] == 1 and base["perm_water"][42, 10] == 0
